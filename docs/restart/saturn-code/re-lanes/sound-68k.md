@@ -228,6 +228,7 @@ manifest; offline check: 1,649 outputs, 0 problems):
 | CD-DA tracks | 29/29 FLAC, decode-verified to the source PCM | 29/29 |
 | XBAND sound banks (run 1351Z) | 2 tone banks (28 samples), 2 sequence banks (19 songs, MIDI), 1 DSP program, 1 area map | none on the disc |
 | Sound-ID table (run 1611Z) | 322 records, 20 clip names, 28-entry item table, 384 call sites (377 constant), 17 clip-stream sites | same 322 records; 375 call sites (368 constant), 16 clip-stream sites |
+| Sequencer render (run 1611Z) | 11 songs through the original driver (maps 0/2): 330 events, 70 note-offs, 0 mismatches; control rejected | not run |
 
 FLAC files (247 MB per release) stay in `$RE_ASSETS_OUT` with committed
 manifests (FLAC and PCM hashes).
@@ -297,7 +298,8 @@ verified dispatch but open bodies. See
 | 20261107T1351Z (cont. 5) | PR #940 | The game DSP program was matched to the reference core state already recorded in the 2026-11-05 evidence (pinned private test). The XBAND driver item was found in the client database: its list starts one entry before the recorded offset, a note for the assets lane. Residency check: extracted banks are byte-exact in reference-core sound RAM (sweep of 1,175 states: 51 of 101 unique payloads). Private head `d4ced488`. |
 | 20261107T1351Z (cont. 6) | PR #942 | Debug sound-effect test and host library versions found in the kernel. A further 384 battle/item states added no resident payloads (51 of 101 stays). Private head `1fbdfdb1`. |
 | 20261107T1611Z | this PR | Shared build: `tools/split/split.py` takes a module-level `source =` and emits a segment that includes the hand-written annotated driver source; `config/usa.toml` uses it for snd/xbsnd/nlsnd and `config/japan.toml` for snd. `make check` is 19/19 byte-identical (snd/xbsnd/nlsnd/japan snd included, and BOOT's embedded NLSND copy follows). Negative control: a one-byte source mutation fails `tools/check.py` at offset 0x1; restoring gives the original hash. Private `9d99455c`. |
-| 20261107T1611Z (cont. 2) | this PR | Driver-render attempt in the isolated probe. Booting Reset needs the SCSP window relocated below 0x80000 and, because data regions may not overlap executable ranges and only 4 ranges are allowed, more disjoint ranges than Reset/MainLoop + BootPatch/BootCheck + ScspInit + VoiceInit need with their literal pools and the `ScspInitRegs` table at 0x3C42. Reset does reach ScspInit with `0x4E1 = 0x7F`; the 0x3C42 table read is the first fault. Recorded as the blocker for frontier item 4; a render should use the full coverage core. Private `97a3cee6`. |
+| 20261107T1611Z (cont. 2) | PR #947 | Driver-render attempt in the isolated probe. Booting Reset needs the SCSP window relocated below 0x80000 and, because data regions may not overlap executable ranges and only 4 ranges are allowed, more disjoint ranges than Reset/MainLoop + BootPatch/BootCheck + ScspInit + VoiceInit need with their literal pools and the `ScspInitRegs` table at 0x3C42. Reset does reach ScspInit with `0x4E1 = 0x7F`; the 0x3C42 table read is the first fault. Recorded as the blocker for frontier item 4; a render should use the full coverage core. Private `97a3cee6`. |
+| 20261107T1611Z (cont. 3) | this PR | Sequencer render. Built a wide variant of the pinned isolated probe (MAX_RANGES/REGIONS 4096, events 65536, data regions to 0x200000; same backend and Musashi pins) and booted the original driver (host config 0x4E1 = 0xFF avoids self-patches). Loaded the PROGRAM.BIN area-map list at 0xA000 with runtime loaded flags and the scene's tone/sequence banks at the map addresses; command 0x08 selects the map, 0x01 starts a song, TimerTick (0x4A00) is called per 88-sample tick. The event ring at (0x450)+0x1A00 is compared with `sound_formats.seq_play`: status type, channel/port, data1/2 and tick (floor(T*256/SLOT_INC), SLOT_INC = 512000/(us_per_beat/resolution)); note-offs are driver-generated and excluded. Eleven songs over maps 0 and 2: 330 events and 70 note-offs, 0 mismatches; negative control (SeqPostEvent type mask #7 -> #6) fails with 8. This is a sequencer render, not an SCSP sample render. Private `1874bd6e`. |
 | 20261107T1611Z (cont.) | this PR | PlaySound scan: a forward dataflow pass re-checks every dynamic call site over its function (constants merged on joins, caller-saved registers undefined after a call). Four sites move to the constant 4 (USA `func_060482FC`/`func_06058492`, Japan `func_0603DD82`/`func_0605DC80`); their r5/r6 arguments are pointers for another routine, so the earlier argument-wrapper reading was wrong. Counts: USA 377/384 constant, Japan 368/375; 7 dynamic per release (six computed lookups + debug SE test). Three synthetic tests. Private `8c0baab9`. |
 
 ## Frontier (ranked)
@@ -311,16 +313,15 @@ verified dispatch but open bodies. See
    `src/usa/snd/snd.s` and `src/usa/nlsnd/nlsnd.s` (19/19 byte-identical).
 2. **DSP behaviour.** The one EXB program is decoded (84/128 steps); next is a
    behavioural test against the original core, then the sound-ID producer map (#707).
-4. **Render through the original driver** (88-sample ticks) and compare with
-   the decoded sequences and tone banks. Blocker found in run 20261107T1611Z:
-   the isolated m68k probe cannot boot the driver. Data regions may not
-   overlap executable ranges and only 4 ranges are allowed; Reset/MainLoop,
-   BootPatch/BootCheck, ScspInit and VoiceInit plus their PC-relative literal
-   pools and the `ScspInitRegs` table at 0x3C42 need more disjoint ranges. The
-   SCSP window must also move below 0x80000 (0x100000 -> 0x40000). Reset runs
-   to ScspInit under that relocation with `0x4E1 = 0x7F` (no self-patches),
-   then faults at the 0x3C42 table read. A render needs the full coverage
-   core/emulator, not more isolated-probe ranges.
+4. **Render through the original driver.** Sequencer render done in run
+   20261107T1611Z: a wide variant of the pinned isolated probe (limits raised,
+   original driver bytes, host config 0x4E1 = 0xFF) boots Reset, loads an area
+   map and scene banks, runs command 0x01 and ticks TimerTick, then compares
+   the voice-layer event ring with the decoded model. Eleven songs over maps 0
+   and 2: 330 sequence events and 70 driver note-offs, 0 mismatches; the
+   negative control (SeqPostEvent type mask #7 -> #6) fails with 8. A
+   sample-accurate SCSP render still needs the full coverage core; tone key-on
+   and resident payloads are verified separately.
 5. **Sound IDs.** USA producer map done (run 20261107T1351Z, above); the
    remaining items are in 0.
 
