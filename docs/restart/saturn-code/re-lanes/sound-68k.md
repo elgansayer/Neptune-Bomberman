@@ -228,7 +228,7 @@ manifest; offline check: 1,649 outputs, 0 problems):
 | CD-DA tracks | 29/29 FLAC, decode-verified to the source PCM | 29/29 |
 | XBAND sound banks (run 1351Z) | 2 tone banks (28 samples), 2 sequence banks (19 songs, MIDI), 1 DSP program, 1 area map | none on the disc |
 | Sound-ID table (run 1611Z) | 322 records, 20 clip names, 28-entry item table, 384 call sites (377 constant), 17 clip-stream sites | same 322 records; 375 call sites (368 constant), 16 clip-stream sites |
-| Sequencer render (run 1611Z) | all 45 songs of b14 seq0 (map 2), 1200 ticks: 1,193 events, 305 note-offs, 0 mismatches; 11 detailed reports (maps 0/2) also pass; control rejected | not run |
+| Sequencer render (run 1611Z) | 148/148 songs: USA b14 seq0 (map 2), b18 seq1 (map 10), b22 seq1 (map 13); Japan b13 seq0 (map 2), b12 seq0 (map 0): 5,269 one-pass events, 1,255 note-offs, 0 mismatches; multi-tempo songs compared without ticks; control rejected | 148/148 (Japan and USA driver bytes identical) |
 
 FLAC files (247 MB per release) stay in `$RE_ASSETS_OUT` with committed
 manifests (FLAC and PCM hashes).
@@ -299,7 +299,9 @@ verified dispatch but open bodies. See
 | 20261107T1351Z (cont. 6) | PR #942 | Debug sound-effect test and host library versions found in the kernel. A further 384 battle/item states added no resident payloads (51 of 101 stays). Private head `1fbdfdb1`. |
 | 20261107T1611Z | this PR | Shared build: `tools/split/split.py` takes a module-level `source =` and emits a segment that includes the hand-written annotated driver source; `config/usa.toml` uses it for snd/xbsnd/nlsnd and `config/japan.toml` for snd. `make check` is 19/19 byte-identical (snd/xbsnd/nlsnd/japan snd included, and BOOT's embedded NLSND copy follows). Negative control: a one-byte source mutation fails `tools/check.py` at offset 0x1; restoring gives the original hash. Private `9d99455c`. |
 | 20261107T1611Z (cont. 2) | PR #947 | Driver-render attempt in the isolated probe. Booting Reset needs the SCSP window relocated below 0x80000 and, because data regions may not overlap executable ranges and only 4 ranges are allowed, more disjoint ranges than Reset/MainLoop + BootPatch/BootCheck + ScspInit + VoiceInit need with their literal pools and the `ScspInitRegs` table at 0x3C42. Reset does reach ScspInit with `0x4E1 = 0x7F`; the 0x3C42 table read is the first fault. Recorded as the blocker for frontier item 4; a render should use the full coverage core. Private `97a3cee6`. |
-| 20261107T1611Z (cont. 4) | this PR | Render sweep: all 45 songs of `b14_s_nor1` seq0 through the original driver for 1200 ticks, 1,193 sequence events and 305 note-offs, 0 mismatches. Song 11 has a tempo map; a single SLOT_INC cannot predict its posting ticks, so it is compared on type/channel/data with `tick_checked=false`. Detailed reports for 11 songs and the control are refreshed. Private `19a7290c`. |
+| 20261107T1611Z (cont. 4) | PR #949 | Render sweep: all 45 songs of `b14_s_nor1` seq0 through the original driver for 1200 ticks, 1,193 sequence events and 305 note-offs, 0 mismatches. Song 11 has a tempo map; a single SLOT_INC cannot predict its posting ticks, so it is compared on type/channel/data with `tick_checked=false`. Private `19a7290c`. |
+| 20261107T1611Z (cont. 6) | this PR | Added the Japan banks: `b13_s_nor1` map 2 seq 0 (45 songs) and `b12_s_open` map 0 seq 0 (7 songs) both pass, 1,343 one-pass events and 359 note-offs. Total render sweep: 148/148 songs across five bank/release combinations, 5,269 events, 1,255 note-offs, 0 mismatches. Private `06f4b753`. |
+| 20261107T1611Z (cont. 5) | this PR | Three-bank render sweep: 96/96 songs (b14 map 2 seq 0, b18 map 10 seq 1, b22 map 13 seq 1), 3,926 one-pass sequence events and 896 driver note-offs, 0 mismatches. The posting tick is `max(0, ceil(T*256/SLOT_INC)-1)`; songs with a tempo map are compared without the tick, and extra loop repeats after the model's pass are ignored (156). Added `--tone-source`/`--seq-source` for scenes whose banks live in another extracted directory. Private `b5ce7e2d`. |
 | 20261107T1611Z (cont. 3) | this PR | Sequencer render. Built a wide variant of the pinned isolated probe (MAX_RANGES/REGIONS 4096, events 65536, data regions to 0x200000; same backend and Musashi pins) and booted the original driver (host config 0x4E1 = 0xFF avoids self-patches). Loaded the PROGRAM.BIN area-map list at 0xA000 with runtime loaded flags and the scene's tone/sequence banks at the map addresses; command 0x08 selects the map, 0x01 starts a song, TimerTick (0x4A00) is called per 88-sample tick. The event ring at (0x450)+0x1A00 is compared with `sound_formats.seq_play`: status type, channel/port, data1/2 and tick (floor(T*256/SLOT_INC), SLOT_INC = 512000/(us_per_beat/resolution)); note-offs are driver-generated and excluded. Eleven songs over maps 0 and 2: 330 events and 70 note-offs, 0 mismatches; negative control (SeqPostEvent type mask #7 -> #6) fails with 8. This is a sequencer render, not an SCSP sample render. Private `1874bd6e`. |
 | 20261107T1611Z (cont.) | this PR | PlaySound scan: a forward dataflow pass re-checks every dynamic call site over its function (constants merged on joins, caller-saved registers undefined after a call). Four sites move to the constant 4 (USA `func_060482FC`/`func_06058492`, Japan `func_0603DD82`/`func_0605DC80`); their r5/r6 arguments are pointers for another routine, so the earlier argument-wrapper reading was wrong. Counts: USA 377/384 constant, Japan 368/375; 7 dynamic per release (six computed lookups + debug SE test). Three synthetic tests. Private `8c0baab9`. |
 
@@ -319,10 +321,12 @@ verified dispatch but open bodies. See
    original driver bytes, host config 0x4E1 = 0xFF) boots Reset, loads an area
    map and scene banks, runs command 0x01 and ticks TimerTick, then compares
    the voice-layer event ring with the decoded model. Eleven songs over maps 0
-   and 2: 330 sequence events and 70 driver note-offs, 0 mismatches; a 1200-tick
-   sweep of all 45 songs of `b14_s_nor1` seq0 then gave 1,193 events and 305
-   note-offs, 0 mismatches (one multi-tempo song compared without the tick
-   field); the negative control (SeqPostEvent type mask #7 -> #6) fails with 8. A
+   and 2: 330 events and 70 note-offs, 0 mismatches. A three-bank sweep then
+   rendered 148/148 songs (USA b14 map 2 seq 0, b18 map 10 seq 1, b22 map 13
+   seq 1; Japan b13 map 2 seq 0 and b12 map 0 seq 0): 5,269 one-pass events and
+   1,255 note-offs, 0 mismatches. Multi-tempo songs are
+   compared without the tick field and extra loop repeats are ignored; the
+   negative control (SeqPostEvent type mask #7 -> #6) fails with 8. A
    sample-accurate SCSP render still needs the full coverage core; tone key-on
    and resident payloads are verified separately.
 5. **Sound IDs.** USA producer map done (run 20261107T1351Z, above); the
