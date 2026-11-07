@@ -18,42 +18,195 @@ build on the splitter and build.
 Denominator: every byte of every code-bearing file classified and covered by the
 byte-identical build, and every module in the build.
 
+## Status (run 20261107T0822Z)
+
+Private repo commit: `235efea` (clean C rebuild + XBAND/XS re-split + `make check` 19/19 under the heavy lock).
+
+**4,702 MATCHING** by the private progress generator (1,292 at the start of this run). Per module: BOOT 760,
+XS 232, XBAND 3,664, H2H 46. Run 20261106T1722Z's last figure, 1,245, was a running count that left out H2H.
+
+**XBAND's own code is compiled C, and 3,406 of its functions now match.**
+- XBAND.BIN `0x06006000`-`0x060A0000` is the XBAND client itself (Catapult), not the shared NetLink layer.
+- **How it was built:** without `-O`. The SH port forces optimization on anyway, so the code is optimized and
+  keeps its frame pointer, with no scheduling after reload. But only variables declared `register` get
+  registers; anything else lives in a stack slot. The compiler is a GCC 2.7 without SH `PROMOTE_MODE`
+  (FSF added it on 4 May 1995), so short/char variables are widened where they are used. The build's
+  variant is `xb2`.
+- Most of the matches are dispatcher stubs. Each passes a selector and its parameters to one dispatcher,
+  which looks the routine up in RAM tables. A `void` stub keeps its `register` parameters live to the end of
+  its scope, so they land in callee-saved registers. A value-returning stub looks ordinary; both are now
+  reproduced. Generators write C for the stubs and for common small shapes (constants, getters/setters,
+  call wrappers, field reads, min/max, byte-order helpers, class dispatch).
+- Trap: without `-O`, only the first function of a source file is expanded that way. Candidates must be
+  tested one function per file, as the build compiles them.
+- 13 stubs that push a 4th argument need GCC 2.6.3's delay-slot memory rule as well (`xb6` = `xb2` + that
+  rule; the full regression leaves all 3,120 other entries unchanged).
+- Rejected this run: no SH `PUSH_ROUNDING` (argument order), stupid register allocation kept, FSF GCC 2.6.3
+  as a whole (it fails an ordinary switch function), and a deferred-parameter-copy variant (`xb3`, which
+  the `register` model made unnecessary except for 2 pass-through stubs).
+
+Next:
+- About 2,846 XBAND functions remain asm-only, mostly unique. Write C by hand: `register` on every variable the
+  original keeps in a register, `xb2 -m2`, one function per file.
+- Move XBAND to `xb6`: the full regression is clean (3,120/3,120). Then retry XBAND's soft-float and newlib
+  routines (`xb6` with `-O2 -fno-force-mem` finds 3 more libgcc units).
+- BOOT's main body (1,000 asm-only) as before.
+
+## Status (run 20261106T1722Z)
+
+Private repo commit: `8fb8764` (last build check 19/19 byte-identical at `ce79712`; one documentation commit after it).
+
+**1,186 MATCHING** (1,149 at the start of the run; +37 so far). BOOT: 701 of 1,760 entries MATCHING.
+
+**The NetLink layer's compiler now lets halfword stores take a constant source (`nocopy17w`).**
+- `nocopy17w` is `nocopy17` with one change to the halfword move pattern: like the word pattern, it accepts a
+  constant source when the destination is memory. Combine then folds the constant into the store and reload
+  picks its register. In BOOT `0x06062000`-`0x06067000` the original stores such constants from `r3`/`r7`.
+- It leaves all 700 recorded `nocopy17` functions (BOOT, XS, XBAND and H2H) byte-identical and matches 4 more.
+- Rejected: relaxing the byte move pattern as well (`nocopy17h`): 126 of 655 layer functions change, because
+  the original stores byte constants from `r1`.
+- The regression check (`cregress.py`) now covers H2H too.
+
+What the 33 main-body functions are (cc1 `la4`): hook wrappers and hook tables, record scans and resets, a list
+unlink, a tag skipper, an `alloca` string copy, the backup-library status call and its error-code map.
+
+Source idiom found this run: a chain of equality tests on one character matches only as one `if` per test. GCC 2.7.2
+folds an `||` chain of adjacent constants into range tests, and the original has none.
+
+Compiler leads recorded in the private `docs/TOOLCHAIN.md`:
+- the prologue push placed in a branch delay slot past a load from a structure (`060608E4`, `06060710`);
+- an indexed store for `a[i]` (experiment `la5b`: identical on all 377 `la4` functions, but no near miss matched yet).
+
+## Status (run 20261106T1222Z)
+
+Private repo commit: `0f83d82` (last build check at that commit, 19/19; clean rebuild 19/19 at `dd0068b`, 13:34Z).
+
+**1,149 MATCHING** (794 at the start of run 20261106T0917Z, 885 at the start of this run; +264 this run). C
+functions: BOOT 591, XS 219, XBAND 219; library routines unchanged (120). BOOT: 664 of 1,760 entries MATCHING.
+
+**BOOT's main body is GCC output with its own compiler configuration.**
+- The main body (`0x06010000`-`0x06067000`, below the NetLink layer) was compiled with
+  `-m2 -O2 -fomit-frame-pointer`. A few regions keep the frame pointer (`-m2 -O2`).
+- Its compiler, `la3`, is `jan96` (FSF 2.7.2 with the SH changes of 9 Dec 1995 and 2 Jan 1996) plus an SH
+  `LEGITIMIZE_ADDRESS`. For a 4-byte access whose displacement does not fit `add #imm8`, the displacement goes
+  into a register and the access is indexed (`@(r0,Rn)`). FSF 2.7.2's macro is empty, so it adds the
+  constant to the base first. Displacements 64..127 still use `add`, as in the original.
+- Over the first 91 main-body functions: `la3` matches 91, `jan96` 87, plain 2.7.2.3 86, and the NetLink
+  layer's `nocopy17` 78. `la3` leaves the 25 `jan96` library units identical. So the layer and the main body
+  were built separately.
+- Rejected: indexing every access size and every displacement (`la1`) and every 4-byte displacement (`la2`).
+- **`la4` replaces `la3` (this run):** the same indexed form for byte and halfword accesses too, with the same
+  displacement limit. It changes none of the 310 recorded `la3` functions or the 25 `jan96` library units, and it
+  matches a function whose byte stores at large offsets are indexed. The same address change on the NetLink
+  layer's compiler loses 30 of its 649 functions, so the layer was not built with it.
+
+**New build feature: C units that start with constants (`lead=N`).**
+- GCC 2.7.2 writes a function's string literals into `.text` just before the function. So do constants it
+  forces into memory, such as the multiplier of a division by a constant. The originals have them in the same
+  place.
+- A C function entry can now say that its compiled unit starts N bytes before the function address. The
+  splitter cuts there and places the function symbol inside the unit. The C comparison tool measures N from
+  the object.
+- Negative control: changing one character of a literal fails `make check` at that byte.
+- Literals that GCC merged within one original source file stay external references.
+
+What the 264 functions are:
+- PPP/LCP/IPCP trace wrappers, modem command senders, and the modem state-machine event handlers (switch tables);
+- SMPC and SCU register access, an interrupt handler, BIOS calls (including the backup-library table);
+- the `sprintf` wrapper (varargs), memory-region lookups, ring-buffer and byte readers;
+- list walks and frees, record initialisers, and accessors of large records;
+- the launcher of the TRAMP copy routine. This resolves an open module-map item: TRAMP runs at `0x00200000`, or
+  at `0x00300000` minus its 0x8C bytes, and the launcher jumps there without returning.
+
+**The NetLink layer starts lower than thought.** BOOT's code at `0x06062000`-`0x06067000` keeps the frame
+pointer, and it is built with the layer's compiler (`nocopy17 -m2 -O2 -fno-force-mem`): one function there matches
+only with a nocopy cc1, and three more give the same bytes with it. Its halfword stores of constants use `r3`/`r7`
+in the original and `r1` with every cc1, which is the next experiment.
+
+A twin scan groups BOOT functions by their instruction bytes (literal pools excluded), so one C source covers every
+member of a group. It found a group of six object-step handlers and three pairs.
+
+Verification:
+- every function was compared byte for byte by the private `ctry.py` before it was recorded;
+- each batch of 2-25 was then checked by a BOOT re-split and `make check` (19/19 byte-identical) before its
+  commit, 34 times this run (the last 33 functions after the clean rebuild);
+- clean rebuilds with every C object recompiled passed 19/19 at 12:24Z and at the end (13:34Z, 561 C sources);
+- negative control after the final check: one changed constant in a main-body source fails `make check` at that
+  byte; restored, 19/19.
+
+Compiler leads from the near misses are listed in the private `docs/TOOLCHAIN.md`:
+- loop-counter elimination in favour of the reduced induction variable;
+- `x == 0 || x == 1` kept as two tests;
+- an unfilled `bra` delay slot;
+- the register of a stored constant in frame-pointer code.
+
 ## Status (run 20261106T0722Z)
 
-Private repo commit: `c50e7cf` (this run's commits: `99268e1` to `c50e7cf`).
+Private repo commit: `450d254` (this run's commits: `99268e1` to `450d254`; the last verified build state is `dded95e`,
+followed by one documentation commit).
 
-**721 MATCHING** (712 at the start of the run; the previous run's last 27 were verified first: re-split and
-`make check` 19/19 byte-identical, private `99268e1`). C functions: BOOT 201, XS 200, XBAND 200; library
-routines unchanged (120). Verified at `c50e7cf` under the heavy lock: every C object recompiled
-(`rm -rf build/csrc`, 204 sources), re-split of BOOT/XS/XBAND, `make check` 19/19 byte-identical.
+**794 MATCHING** (712 at the start of the run; +82). The previous run's last 27 were verified and committed
+first. C functions: BOOT 236, XS 219, XBAND 219; library routines unchanged (120).
 
-**The NetLink layer's compiler is now `nocopy10a`** (`-m2 -O2 -fno-force-mem`):
+Verification under the heavy lock:
+- clean rebuilds (`rm -rf build/csrc`, re-split of BOOT/XS/XBAND, `make check`) passed 19/19 byte-identical at
+  721 (07:50Z, `nocopy10a`) and at 757 (08:31Z, `nocopy13`, 216 C sources);
+- the final 790 state passed 19/19 at 08:57Z (`nocopy17`, 235 C sources, 12 of them built without `-O`);
+  negative control after it: one changed constant in a shared source fails `make check` in BOOT, XS and XBAND,
+  each inside that function; restored, 19/19;
+- the last functions were checked by more clean rebuilds and `make check`: 791 at 09:05Z and 794 at 09:08Z, 19/19
+  (239 C sources);
+- every function was compared byte for byte with BOOT, XS and XBAND (`ctry.py`) before it was recorded;
+- every compiler change was decided by a regression check over all recorded C functions (0 regressions).
 
-- `nocopy10a` = `nocopy6` with FSF GCC's move expander (`prepare_move_operands`) restored. Constants and
-  memory values are copied into pseudo registers at expand time again, as in FSF GCC 2.6.3/2.7.2.3. Only
-  the permissive condition of the SH `movsi_i` pattern stays (a constant or memory source may go straight
-  to a memory destination).
-- With that, two standard passes reproduce what run 20261105T2122Z saw as "stores left to reload":
-  - CSE replaces a register known to hold 0 by the constant in a store, because the SH cost of 0 (0) is
-    below a register's (1);
-  - combine folds a constant used by one store only into that store, and reload then loads it.
-  A non-zero constant stored twice keeps its register: in the record reset `060714AC` the original holds
-  -1 in `r2` for two stores and reloads every 0 into `r6`.
-- All 567 recorded layer functions keep matching (one source change), `060714AC` and `0606DD8C` match, and
-  no near miss gets worse.
-- The interrupt-mask helper (an inline `set_imask` like SBL's) now computes the new status-register value
-  as the operand of `ldc` rather than assigning it back. That one form matches every user, including
-  `06071700` (a masked double read with retry). There, a hoisted mask constant gets no callee-saved
-  register, so reload loads it into the result register. The second helper form of the previous run is gone.
-- Rejected (evidence only): zero-only stores (`nocopy9`, breaks 14), a forced constant as the first
-  operand of commutative operations (`nocopy11`, no effect: CSE moves it back), tying the constant operand
-  first in local allocation (`nocopy12`, breaks 21).
-- New private tool `tools/toolchain/cregress.py`: recompiles every recorded C function with a candidate
-  cc1 and scores the near misses, in about 4 CPU-seconds. Every compiler change of this run was decided
-  with it (0 regressions required).
-- Remaining in the layer: 53 shared bodies and 35 BOOT-only functions. Open compiler leads: the
-  base/constant register order for large field offsets used twice (`0606C028`), constant synthesis
-  (`mov #-128; extu.b` for 0x80 in `06071924`), loop-invariant hoisting of constants (`0606EBF8`).
+**Four compiler findings this run. The layer's compiler is now `nocopy17` (`-m2 -O2 -fno-force-mem`):**
+
+1. **`nocopy10a`: the FSF move expander with a permissive `movsi_i`.**
+   - Constants and memory values are copied into pseudos at expand time again, as in FSF GCC.
+   - Only the condition of the SH `movsi_i` pattern stays permissive: a constant or memory source may go
+     straight to a memory destination.
+   - CSE then folds stored zeros back into the stores (a zero costs less than a register), and combine
+     folds single-use constants, which reload loads. A constant stored twice keeps its register.
+2. **`nocopy13`: reload synthesises the constants it loads.**
+   - 128..255 become `mov #v-256; extu.b`.
+   - `b << s` (first `s` of 1, 2, 8, 16) becomes `mov #b; shll<s>`.
+   - Constants that the expander forces into pseudos still come from the literal pool, which is why the
+     originals load a field offset like 0xB4 from the pool but synthesise a stored 0x800.
+3. **`nocopy15`: GCC 2.6.3's `reorg.c` memory model.**
+   - A literal-pool load counts as a memory reference, so a store is never moved past it into a delay slot.
+   - GCC 2.7 tracks unchanging memory separately.
+   - Four near misses matched at once. One of them was the oldest open scheduling lead, "argument moves
+     around the last stores before a call".
+4. **`nocopy17`: the rest of the FSF SH change of 2 Jan 1996.**
+   - The earlier `jan96` cc1 had only one part of that change. The rest stops the SH backend forcing
+     optimisation and delayed branches when no `-O` is given.
+   - Some BOOT code was built without `-O` (every delay slot a `nop`). All 16 BOOT functions that look like
+     that now match, most on the first try (XBAND, XS and H2H have none). Code built with `-O2` is unchanged.
+
+So the vendor compiler is FSF 2.7.2 with the late-1995/January-1996 SH changes and at least three GCC 2.6.3-era
+parts: cbranch delay slots, the merge-point search and the reorg memory model. GCC 2.6.3's whole `reorg.c`
+loses the four `nocopy15` matches, so its reorg is a mix.
+
+- Rejected (evidence only):
+  - zero-only constant stores (`nocopy9`);
+  - a forced constant as operand 1 (`nocopy11`);
+  - tying the constant operand first in local allocation (`nocopy12`);
+  - immediate loads typed as pool loads for the scheduler (`nocopy14`, breaks 350);
+  - 2.6.3's whole `reorg.c` (`nocopy16`).
+- Source idioms that mattered (no code):
+  - a struct copy where the original copies bytes through one incremented pointer;
+  - one block-local pointer per group of stores to a global record;
+  - if/else instead of a ternary for the branch layout;
+  - chained assignments (`a = b = 0`) for the store order;
+  - comparison operands in the original order;
+  - one result variable shared by several calls;
+  - an interrupt-mask helper that computes the new status word as the `ldc` operand.
+- New functions include the request-queue walk and three request state machines (up to 508 bytes), the
+  file open, seek, read and window functions, the SH-2 DMA copy, the file-layer init, and BOOT's unoptimised
+  display-list, table and command-area helpers.
+- Remaining in the layer: 34 shared bodies and 35 BOOT-only functions. Open compiler leads are callee-saved
+  register priority and a few scheduling/allocation choices, each listed with its near miss in the private
+  `docs/TOOLCHAIN.md`.
 
 ## Status (run 20261106T0222Z)
 
@@ -159,7 +312,7 @@ to reload.**
 | Modules rebuilt byte-identically by `make check` | **14/14** (2,971,194 bytes) |
 | Whole code-bearing files rebuilt and verified | **all 14 census code-bearing sources** (USA 11, Japan 3). The 5 containers (USA/Japan system area, USA/Japan PROGRAM.BIN, XBAND.DAT) take their code from the disassembled modules via `.incbin`; their other bytes are data owned by the asset lanes |
 | Modules disassembled | **14/14**; 1,988,942 code bytes emitted as instructions, the rest as data |
-| Functions MATCHING / NONMATCHING-verified / asm-only | **721** / see usa-code / 18,302 static entries (19,023 known; USA 14,027 incl. the duplicate XBSND; Japan 4,996). 601 are C functions compiled by GCC 2.7.2.3 variants (BOOT 201, XS 200, XBAND 200): the NetLink application layer, built from one source per function into every module that holds it. 120 are library routines compiled from their original free-software sources: GCC's libgcc (BOOT 55, XBAND 22, XS 3, H2H 1) and Cygnus newlib 1.6.1 (BOOT 18, XBAND 17, XS 4). 20 more inventory entries are extra entry points inside those routines and are not counted as functions |
+| Functions MATCHING / NONMATCHING-verified / asm-only | **794** / see usa-code / 18,229 static entries (19,023 known; USA 14,027 incl. the duplicate XBSND; Japan 4,996). 674 are C functions compiled by GCC 2.7.2.3 variants (BOOT 236, XS 219, XBAND 219): the NetLink application layer, built from one source per function into every module that holds it, and 16 BOOT helpers built without `-O`. 120 are library routines compiled from their original free-software sources: GCC's libgcc (BOOT 55, XBAND 22, XS 3, H2H 1) and Cygnus newlib 1.6.1 (BOOT 18, XBAND 17, XS 4). 20 more inventory entries are extra entry points inside those routines and are not counted as functions |
 | SH-2 instructions as mnemonics | USA: KRNL 283,487, BOOT 150,786, XBAND 225,221, XS 13,224, H2H 3,009, FLD 1,652, IP 703, SAMPLEIP 719. Japan: KRNL 285,623, IP 719 |
 | Cross-file `bsr` kept as raw words | KRNL 1,461; Japan KRNL 1,468; IP/SAMPLEIP 12 each |
 | 68000 instructions as verified mnemonics | SND/XBSND/Japan SND 4,050 of 4,051; NLSND 3,746 of 3,747 |
@@ -633,20 +786,79 @@ Next frontier:
 3. Still open: XBAND's soft-float core and newlib, BOOT's remaining C library, the CPK work-area code
    origin, unclassified bytes, SBL symbol names. Owner decision: a licensed Hitachi SHC for KRNL.
 
-### 20261106T0722Z (this run)
+### 20261106T0722Z
 
-Moved: **721 MATCHING** (from 712). See the status section for the compiler finding.
+Moved: **794 MATCHING** (from 712). See the status section for the four compiler findings.
 
-- Verified the previous run's uncommitted last batch first (re-split, `make check` 19/19) and committed it.
-- Wrote a regression check for compiler variants over all recorded C functions (private `cregress.py`) and
-  tested four variants against it: one adopted (`nocopy10a`), three rejected.
-- Verification: clean rebuild of all C objects with `nocopy10a`, re-split of BOOT/XS/XBAND, `make check`
-  19/19 byte-identical (07:50Z).
+- Verified and committed the previous run's uncommitted last batch first.
+- Wrote a regression check for compiler variants over all recorded C functions (private `cregress.py`).
+  Tested nine variants against it: four adopted (`nocopy10a`, `nocopy13`, `nocopy15`, `nocopy17`), five rejected.
+- Wrote C for 22 more shared functions (+66), smallest-first among the bodies not tried before, plus former
+  near misses that the new compilers made reachable; and 16 BOOT functions built without `-O` (+16).
+- Verification: see the status section. Another lane held the heavy lock for long stretches, so batches
+  were verified by `ctry.py` first and by a clean `make check` whenever the lock was free.
 
 Next frontier:
 
-1. The 53 shared bodies and 35 BOOT-only functions left in the NetLink layer, with `nocopy10a`.
-2. Compiler leads: base/constant order for large field offsets used twice (`0606C028`, `0606AABC`), constant
-   synthesis for 128-255, loop-invariant hoisting of constants.
+1. The 34 shared bodies left (among them `0606E740`, 888 bytes, and `0606FC70`, which fills delay slots with
+   `or r0,r0`) and the BOOT-only functions of the layer, with `nocopy17`. (BOOT code built without `-O` is
+   done: all 16 such entries match.)
+2. Compiler leads:
+   - GCC 2.6.3's long-branch filler `or r0,r0` (`0606FC70`; the -O0 BOOT helpers use `nop`, so possibly two
+     compiler builds);
+   - global-alloc priority between equal-looking pseudos (`0606E384`, `0606DCEC`, `0606E408`);
+   - scheduling of a constant load next to an independent copy (`06070CBC`, 4 bytes);
+   - the base/constant order for large offsets used twice (`0606C028`);
+   - the stack-pop order after a call with a pushed argument (`0606B0A4`).
 3. Still open: XBAND's soft-float core and newlib, BOOT's remaining C library, the CPK work-area code
    origin, unclassified bytes, SBL symbol names. Owner decision: a licensed Hitachi SHC for KRNL.
+
+### 20261106T0917Z (cut by the usage limit after 21 minutes; no result line)
+
+- Found that BOOT's main body is GCC output built with `-fomit-frame-pointer`, and built the `la3` cc1
+  (status section). Wrote C for 91 small main-body functions.
+- Committed 46 at private `a504f2f` after `make check` 19/19 (840 MATCHING). The other 45 were checked with
+  `ctry.py` but not committed, and there is no ledger entry for the run.
+
+### 20261106T1222Z
+
+- Verified the previous run's 45 uncommitted functions with a clean rebuild (19/19), then committed them
+  (private `e252f5e`, 885 MATCHING).
+- Added the `lead=N` build feature and 231 more main-body functions in 18 verified batches. Adopted the `la4`
+  compiler (0 regressions). Final state: 1,149 MATCHING at private `0f83d82`.
+- Another lane held the heavy lock for most of the run. Incremental BOOT checks were measured at about 14
+  CPU-seconds and ran niced without the lock.
+- Deviation: the final clean rebuild of all three modules also ran without the lock and cost 82 CPU-seconds, over
+  the 1-minute guideline. Future clean rebuilds go under the lock.
+- Next:
+  - the main body's remaining 1,096 BOOT entries (the 61-200 byte buckets first);
+  - `nocopy17h` (constant sources allowed for halfword/byte memory destinations) for the layer's frame-pointer
+    code at `0x06062000`-`0x06067000` (the build waited for the heavy lock all through this run's last hour and
+    was withdrawn unbuilt);
+  - the compiler leads in the private `docs/TOOLCHAIN.md`: loop-counter elimination, `x == 0 || x == 1` kept as
+    two tests, an unfilled `bra` delay slot, and the stored-constant register in frame-pointer code.
+
+### 20261106T1722Z, 20261106T1842Z, 20261107T0612Z
+
+- 1722Z: BOOT main-body batches and the layer compiler `nocopy17w`. Its last private commit (`a5632d7`) is
+  in this run's baseline; the status section above has its findings.
+- 1842Z and 0612Z exited without a result and left no evidence or commits.
+
+### 20261107T0822Z (this run)
+
+- Baseline at private `c0851bc`: full split + `make check` 19/19 under the heavy lock (98 CPU-s).
+- Found that XBAND's own code is GCC output and that most of its small entries are dispatcher stubs.
+  First model: `-O1` with a deferred-parameter-copy compiler (`xb3`); 1,461 stubs at private `bb30158`, `make check`
+  19/19, with a negative control.
+- Then found the real model: built without `-O`, with `register` parameters, by a GCC 2.7 without SH `PROMOTE_MODE`
+  (`xb2`). It also explains the stubs that keep parameters in callee-saved registers. Converted the 1,461 stubs,
+  added 1,945 more XBAND functions (stubs, templates for small shapes, some written by hand) and 4 XS loader
+  functions.
+- Final state: private `235efea`, 4,702 MATCHING; clean C rebuild + XBAND/XS re-split + `make check` 19/19
+  under the heavy lock. A full `xb6` regression (3,120/3,120) ran under the lock as well.
+- Built and tested 8 compiler variants (`xb1`-`xb6`, FSF 2.6.3, reconstructed 2.7.0/2.7.1); kept `xb2`, `xb6` and,
+  for 2 entries, `xb3`.
+- The heavy lock was busy with other lanes' emulator batches for most of the run. My queued checks were
+  withdrawn only while still waiting (no child process), to add more work, and then re-queued.
+- Left for the next run: 13 functions matched and staged in private evidence (`next-run/`), not applied.
+

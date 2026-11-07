@@ -37,12 +37,12 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     ready = sub.add_parser("readiness")
     ready.add_argument("snapshot", type=Path)
-    for name in ("enqueue", "show", "recover", "status"):
+    for name in ("enqueue", "show", "recover", "status", "history"):
         command = sub.add_parser(name)
         command.add_argument("--database", type=Path, required=True)
         if name == "enqueue":
             command.add_argument("snapshot", type=Path)
-        if name == "show":
+        if name in ("show", "history"):
             command.add_argument("job")
     claim = sub.add_parser("claim")
     claim.add_argument("--database", type=Path, required=True)
@@ -50,7 +50,7 @@ def main():
     claim.add_argument("--ttl", type=int, default=300)
     claim.add_argument("--receipt", type=Path, required=True, help="new private file for the lease receipt")
     claim.add_argument("job")
-    for name in ("heartbeat", "checkpoint", "request", "deliver", "release"):
+    for name in ("heartbeat", "checkpoint", "request", "deliver", "release", "attempt"):
         command = sub.add_parser(name)
         command.add_argument("--database", type=Path, required=True)
         command.add_argument("--receipt", type=Path, required=True)
@@ -77,7 +77,7 @@ def main():
                 result = store.status()
             elif args.command == "claim":
                 result = public(claim_to(store, args.receipt, args.job, args.owner, args.ttl))
-            elif args.command in ("heartbeat", "checkpoint", "request", "deliver", "release"):
+            elif args.command in ("heartbeat", "checkpoint", "request", "deliver", "release", "attempt"):
                 receipt = json.loads(args.receipt.read_text())
                 if args.command == "heartbeat":
                     store.heartbeat(receipt, args.ttl)
@@ -89,14 +89,20 @@ def main():
                     result = store.request(receipt, json.loads(args.payload.read_text()))
                 elif args.command == "deliver":
                     result = store.deliver(receipt, args.request, json.loads(args.payload.read_text()))
+                elif args.command == "attempt":
+                    payload = json.loads(args.payload.read_text())
+                    result = store.record_attempt(receipt, payload["outcome"], payload["provider"], payload["model"],
+                                                  payload.get("spend", 0), payload.get("reason", ""), payload.get("retry_after"))
                 else:
                     store.release(receipt, args.state, args.reason)
                     result = {"released": args.state}
-                if args.command == "release" or (args.command == "request" and result["waiting"]):
+                if args.command == "release" or (args.command == "request" and result["waiting"]) or (args.command == "attempt" and result["state"] != "running"):
                     args.receipt.unlink()  # the lease ended; a stale copy would only be refused
             elif args.command == "show":
                 result = store.get(args.job)
                 result.pop("token", None)
+            elif args.command == "history":
+                result = {"job": args.job, "attempts": store.attempts(args.job)}
             else:
                 store.recover()
                 result = {"recovered": True, "scope": "local leases only"}

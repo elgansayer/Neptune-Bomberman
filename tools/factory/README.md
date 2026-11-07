@@ -347,8 +347,8 @@ reflect fresh external claims, dependencies and capabilities.
 
 ## Coordinator API
 
-`JobStore(database_path)` exposes `enqueue`, `claim`, `heartbeat`, `checkpoint`, `request`, `deliver`, `status`,
-`begin_publication`, `release`, `cancel`, `recover`, `reconcile` and `get`.
+`JobStore(database_path)` exposes `enqueue`, `claim`, `heartbeat`, `checkpoint`, `record_attempt`, `attempts`,
+`request`, `deliver`, `status`, `begin_publication`, `release`, `cancel`, `recover`, `reconcile` and `get`.
 Close connections explicitly. Use an existing private coordinator-owned directory
 on local disk; SQLite on a shared network filesystem is not supported here.
 
@@ -392,6 +392,39 @@ nothing. `lease.recorded` describes the store's own lease only.
 `process_liveness` is always `unknown`, because the store cannot observe processes.
 A session outside this store and the shared broker remains unaccounted. Pass
 `JobStore(path, max_running=N)` to queue claims beyond a configured cap.
+
+### Durable attempts, spend and provider failure policy (#33)
+
+`record_attempt(receipt, outcome, provider, model, spend=0, reason="",
+retry_after=None)` persists one provider attempt and its consumed budget. The
+outcome is `succeeded`, `timeout`, `quota` or `failed`; provider/model version,
+attempt number, spend and history survive coordinator restart. A success keeps
+the lease, resets the consecutive-failure count and never marks the job submitted
+or merged.
+
+A timeout, quota response or failure releases the lease at a new epoch and
+returns the job to `ready` with `next_eligible` set. That delay is exponential
+from the configured base, if supplied by the provider, or `retry_after`,
+capped by `max_backoff`. Claims refuse the job until the delay passes, so a
+transient provider fault cannot cause an immediate retry loop. After
+`max_attempts` consecutive failures the circuit opens: the job becomes `blocked`
+with no next-eligible time and cannot be reclaimed until the coordinator calls
+`reconcile(..., 'clear', ...)`, which resets only the consecutive-failure count
+and retains attempt/spend history. A failure never produces false completion or
+a publication intent.
+
+`spend_limit` is optional at construction and defaults to `None`; this module
+invents no spending limit. When set, a job whose persisted spend reaches the
+limit cannot be claimed, and `status()` reports it as blocked admission while
+preserving evidence. `max_attempts` (default 3), `backoff` (30) and `max_backoff`
+(3600) are bounded retry defaults, not spending policy.
+
+`status()` exposes per-job `attempts`, `failures`, `provider`, `model`, `spent`
+and `next_eligible`, plus the configured `limits`. `attempts(job)` lists the
+persisted history. Events `attempt`, `attempt_failed` and `circuit_opened`
+record every outcome. The CLI mirrors this: `cli.py attempt --receipt ...
+payload.json` records an attempt, and `cli.py history --database ... <job>`
+prints its history. Any non-running outcome deletes the released receipt.
 
 ### Bounded experiment requests and results (#779)
 

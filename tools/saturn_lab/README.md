@@ -364,6 +364,15 @@ validate the tooling, not original-game claims. See the
 [USA inventory result](../../docs/restart/research/2026-11-05-usa-function-inventory.md)
 for commands, measured values and limits.
 
+`sh2_call_args.py` lists every call to a given address (`bsr`/`bra`, and
+`jsr`/`jmp` through a literal-pool load) and the constant value of chosen
+argument registers at each call. A value counts when it comes from an
+immediate, a PC-relative literal, a copy of a callee-saved register holding one,
+or a reload of one spilled to `@r15`. The search never crosses an earlier call
+for a caller-saved register. It is static and executes nothing; synthetic tests
+are in `tests/test_sh2_call_args.py`. The sound-68k lane uses the same rules for
+the game's sound-ID call map (private repository).
+
 `sample_workram.py` reads declared WorkRAM-H values from existing checkpoint
 states. It reports deltas only for consecutive checkpoints whose later run
 restored the earlier exact state with matching frame arithmetic. Optional kernel

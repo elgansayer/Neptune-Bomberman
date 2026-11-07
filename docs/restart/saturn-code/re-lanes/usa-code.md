@@ -69,16 +69,18 @@ order and stub calls on every vector, and at least one detected source mutant
 
 | Module | Static entries | MATCHING | NONMATCHING-verified | Asm-only |
 | --- | ---: | ---: | ---: | ---: |
-| USA KRNL | 4,874 | 0 | 115 | 4,759 |
-| USA BOOT | 1,760 | 181 (code-map lane) | 0 | 1,579 |
+| USA KRNL | 4,879 | 0 | 1,754 | 3,125 |
+| USA BOOT | 1,760 | 760 (code-map lane) | 0 | 1,000 |
 
-The USA modules still rebuild byte-identically: `make check` gives 19/19 in
-run 20261105T1835Z. BOOT's MATCHING count is the code-map lane's (private
-`docs/PROGRESS.md`, 181 at its run 20261105T2122Z). KRNL has one more static entry than before (4,868 + 1)
-because the RNG seed routine `0600A018` was added. It is reached only by a
-tail branch.
+Counts at run 20261107T1350Z, private head `6e37bd54`. KRNL still rebuilds
+byte-identically after every rename (`split.py --only krnl` + `make` +
+`check.py`: `usa/krnl` SHA-256 `20109f50…c798a7`, 14/14 USA modules).
+BOOT's MATCHING count is the code-map lane's (`config/usa/boot.status.txt`).
+KRNL has 11 static entries more than the inventory (4,868 + 11). They are
+functions reached only by a tail branch (`bra`/`jmp`) or only through a pointer
+literal, found while writing C.
 
-The 115 KRNL functions, by private source file (`src/usa/krnl/`):
+The 220 KRNL functions, by private source file (`src/usa/krnl/`):
 
 | File | Functions | System |
 | --- | ---: | --- |
@@ -92,9 +94,10 @@ The 115 KRNL functions, by private source file (`src/usa/krnl/`):
 | `items.c` | 25 | item slots, hiding and revealing items, item spawn, per-frame item animation states, burning soft blocks |
 | `item_pickup.c` | 1 | the effect of each of the 28 item kinds on the bomber who picks it up |
 | `effects.c` | 2 | effect-list reset |
+| `bomb.c` | 20 | bomb records (a doubly linked list): lookups by cell and owner, setting bombs off, cell marks, animation frame |
+| `bomb_move.c` | 12 | moving bombs: stopping on a cell, probing the cell ahead, reversing, one-pixel steps, the second actor, following the owner |
+| `pdec.c` | 73 | a predictive stream decoder: byte, halfword and word streams, history-ring predictors, 1/2/3/4-bit field readers, mode tables |
 
-KRNL now has 4,874 static entries: the inventory's 4,868 plus 6 functions
-that are reached only by a tail branch (`bra`/`jmp`) and that the C work found.
 
 ## Tools and identities
 
@@ -229,23 +232,151 @@ startup re-registers `0x41` → `06006368`. The inventory note is corrected.
   - Orchestrators go in their own files, so their callees run as original
     code and can be stubbed.
 
+### 20261106T0010Z to 20261106T1825Z
+
+- Five runs stopped at the usage limit within seconds of starting. No results.
+- Run 20261105T2255Z had also left `bomb.c` (20 functions) with passing
+  receipts uncommitted when it hit the limit. Run 20261107T0450Z registered and
+  committed it.
+
+### 20261107T0450Z
+
+- Committed the leftover bomb work (private `aa87ad9`): 20 functions over the
+  bomb list. They find the bomb on a cell or of an owner, set off every lit
+  bomb on a cell or of a player, mark and unmark cells, and pick the animation
+  frame.
+- `bomb_move.c` (private `1d9b04b`), 12 functions on moving bombs:
+  - stop a bomb on its cell (fuse at most 1, motion bits off, cell re-marked);
+  - stop every lit bomb;
+  - probe the cell one step ahead (pixel offsets per direction, then field wrap);
+  - test whether that cell blocks the bomb (field bits `0x42B0` or auxiliary
+    bits `0x7000`);
+  - reverse direction (1↔3, 2↔4);
+  - one-pixel step in the bomb's direction;
+  - keep the bomb's second actor in step;
+  - carry the bomb on its owner and move it one pixel toward the owner.
+
+  It also found one more tail-branch entry, `0601F5AC`.
+- `pdec.c` (private `79ddb79`), 73 functions: a predictive stream decoder in
+  KRNL (`0x06033DF0`-`0x0603443C`).
+  - The state record holds input and output pointers, a history ring with
+    index mask and write index, and bit buffers.
+  - The helpers read and write 8/16/32-bit big-endian samples and append to the
+    ring.
+  - The predictors are "previous sample ± 1..32" and "the sample 2..64 entries
+    back".
+  - The bit-field readers take 1, 2 or 4 bits, low bits first, or 3 bits, one
+    from each of three bit planes.
+  - A mode byte selects the sample width (1, 2 or 4 bytes) and the predictor
+    tables.
+  - The driver `0603443C` is still asm.
+- Tools added to the private `tools/difftest/`:
+  - `progress_md.py` regenerates the lane progress file from the status file
+    and receipts;
+  - `mkspec.py` writes difftest specs from a compact table.
+
+### 20261107T1225Z
+
+- Finished the interrupted run's two batches: `small15.c` (22) and
+  `small16.c` (32) KRNL functions NONMATCHING-verified (private `d6514326`).
+- Decompiled and verified the core bomb/fire chain:
+  - `fire_spread` (`0601EA10`, private `9643d9b7`): recursive four-side walk;
+    joins bombs, burns items and soft blocks, stops at hard blocks and
+    recurses around corners.
+  - `fire_cell.c` (private `9398c83b`): `0601E300` makes the effect layer
+    current, draws the cell metatile and marks the hidden bomb; `0601E336`
+    picks the fire record fields, sets the cell bits and draws.
+  - `fire_mark_cell` (`0601ED54`, private `910c7527`): battle hidden-map mark
+    and the hand-off to the effect update.
+  - `bomb_update_all` (`0601EDD2`, private `b6e44f7d`): per-frame bomb list
+    walk, held/ticking fuse, explosion start, fire-pass hand-off.
+  - `effect_update_all` (`0601E3F0`, private `fea07d4e`): per-frame fire
+    effect records, cell draw/clear, exploding-bomb follow, phase transfer.
+  - `bomb_try_hold` (`0601FA22`, private `937a1ca5`): start carrying the lit
+    bomb on a cell (held flag, direction, mode 4).
+  - `bomb_throw` (`0601FB04`, private `944b858c`): throw/carry step off the
+    cell in front; the same commit fixed the hold/throw predecessor-next
+    return, and the hold spec now covers 99/99 PCs.
+  - `fire_record_alloc` (`0601E13C`, private `0c82771a`): fire-effect record
+    allocator (free-slot search, chain insert, phase/owner fields).
+  - `bomb_scene.c` (private `4ac435fd`, `6ea66919`): seven bomb/scene task
+    helpers (`0601D7A8`, `0601D7E4`, `0601D812`, `0601D84A`, `0601D9F0`,
+    `0601D734`, `0601D962`): place-animation finish, task end, timer
+    subtract, script start.
+  - `bomb_table_reset` (`0601DB4C`, private `d486d720`): clear the 50 bomb
+    and 2000 fire-effect records, re-link the heads and reset the serials;
+    the two hardware init callees are stubs in the difftest.
+  - `bomb_record_insert` (`0601DE4E`, private `6831c764`): link a placed bomb
+    between the record-1 predecessor and the head, copy fuse/owner/cell and
+    mark the cell.
+- Receipt audit: all receipts match their current source files
+  (private `5fb9c5a7`); the new receipt is current too.
+- KRNL: 4,876 entries, 1,077 NONMATCHING-verified, 0 MATCHING (SHC blocker);
+  krnl split + `make check` byte-identical (19/19).
+
+### 20261107T1350Z
+
+- 130 more KRNL functions NONMATCHING-verified, all short wrappers that call
+  one or more functions and often end in a tail call:
+  - `small17.c` (45, private `5e8c808e`): task start-up, scene step chains,
+    menu entry checks, map flag updates, 16-bit result clamps;
+  - `small18.c` (85, private `854c827e`): menu entry checks (a test call
+    followed by the menu step), menu value hand-offs, scene start-up chains,
+    16-bit result retries, a clamped plane-colour set-up and record
+    state-pointer setters.
+- Difftest tool changes (private `tools/difftest/`):
+  - new stub return kind `mem:ADDR`: the stub returns a fuzzed RAM word, so
+    both sides of a branch on a callee's result run (a hash of constant
+    arguments is constant and left one side untested);
+  - pointer globals read through record macros are redirected to fuzzed
+    scratch blocks by the batch generator;
+  - `run_retry.sh`: six specs per heavy-lock process, re-running any spec
+    whose process was ended by a signal. An unrelated agent on this host was
+    running `pkill` during this run and ended several difftest processes
+    with SIGTERM before they printed results.
+- Later in the run (private `5e8c808e`..`90cb5f02`), 431 more:
+  `small19.c`..`small32.c`. Most are object (enemy and boss) state handlers:
+  each runs the shared state test, sets the next handler and ends the step,
+  or arms a timer field of the current object record. The rest are scene
+  start-up chains, menu entry checks, CD-block command entry checks, stream
+  record counters, 16.16 sine/cosine quadrant folds, string helpers and
+  record-table clears.
+- Three entries the inventory missed (`060266E6` pointer entry, `06059A2A` and
+  `0606AA06` after another function's `rts`); KRNL static entries are 4,879.
+- Generator directives `@memstub` and `@range` (fuzzed callee results and
+  bounded global values), and argument kinds for self-pointing records.
+- End of run (private `6e37bd54`, `small33.c`..`small40.c` added after
+  `90cb5f02`, `small38.c`/`small39.c` are bomber helpers): KRNL 4,879 entries, 1,754
+  NONMATCHING-verified (677 this run),
+  0 MATCHING (SHC blocker); krnl split + `check.py` byte-identical (14/14 USA
+  modules), `make audit` clean. About 320 of the run's functions are object
+  (enemy/boss) state handlers.
+
 ## Frontier (ranked)
 
 1. **Bomber, bomb and explosion code.** Object records are at `0x060D5F30`
    (124 bytes; `0x060D7768` points at the current one). Bomb count is at +76
-   and fire range at +78, as `item_pickup` shows. Also: the item special
-   actor `0602277C` (uses SHC runtime helpers).
-2. Stage system leftovers: the per-stage hooks (`0x060B30C4`), the view task
+   and fire range at +78, as `item_pickup` shows. Bomb records and bomb
+   movement are in C (`bomb.c`, `bomb_move.c`). The fire chain
+   (`0601EA10`, `0601E300`, `0601E336`, `0601ED54`, `0601EDD2`, `0601E3F0`)
+   and the hold/throw helpers (`0601FA22`, `0601FB04`) plus the record
+   allocator (`0601E13C`) are now in C. Next: the throw/carry state machines
+   `0601F830` and `06020560`, and the item special actor `0602277C` (uses SHC
+   runtime helpers).
+2. **Object (enemy/boss) state machines** (`0x0606C000`-`0x06094000`): the
+   small handlers are mostly in C now; next are the larger per-object
+   handlers and the shared state test `0606CF3E`.
+3. Stage system leftovers: the per-stage hooks (`0x060B30C4`), the view task
    `0600D6B2`, the timer `0602ED18`/`0602ED56`.
-3. **Scheduler and per-frame order (#492).** `060061C4`/`060061E6`/`06006D36`
+4. **Scheduler and per-frame order (#492).** `060061C4`/`060061E6`/`06006D36`
    and the VBlank handler `06006368`. Ordering still open: pad read, game task
    and presentation within a frame.
-4. Ghidra drafts of all 4,869 inventory functions exist in lane evidence
+5. Ghidra drafts of all 4,869 inventory functions exist in lane evidence
    (`tools/ghidra/drafts.sh`). They are a starting point for the C, not
    evidence.
-5. **BOOT game-side functions.** BOOT is GCC output, so they can be MATCHING.
+6. **BOOT game-side functions.** BOOT is GCC output, so they can be MATCHING.
    Coordinate with code-map, which owns BOOT's library units.
-6. **Blocker for KRNL MATCHING:** the owner must supply Hitachi SHC (the
+7. **Blocker for KRNL MATCHING:** the owner must supply Hitachi SHC (the
    1995-96 SH C compiler).
-7. Earlier measurement items stay open: dynamic interrupt handlers, overlay
+8. Earlier measurement items stay open: dynamic interrupt handlers, overlay
    loader, unclassified KRNL halfwords and BOOT's `0x0604B4B0` lifetime.

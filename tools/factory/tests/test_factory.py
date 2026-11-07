@@ -2,6 +2,7 @@ from copy import deepcopy
 import json
 import multiprocessing
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -543,6 +544,169 @@ class Handoff(unittest.TestCase):
         producer = self.checkpointed_producer()
         self.store.deliver(producer, first, result(self.store, self.producer))
         self.assertEqual((self.store.get(self.dependent)["state"], self.store.get(other)["state"]), ("ready", "waiting"))
+
+
+class ProviderAttempts(unittest.TestCase):
+    """Durable attempt/spend records and bounded provider failure recovery."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / "jobs.sqlite"
+        self.now = 1000
+        self.store = JobStore(self.path, lambda: self.now, max_attempts=2, backoff=30, max_backoff=100, spend_limit=10)
+        self.addCleanup(lambda: self.store.close())
+        self.job = self.store.enqueue(snapshot())
+
+    def reopen(self):
+        self.store.close()
+        self.store = JobStore(self.path, lambda: self.now, max_attempts=2, backoff=30, max_backoff=100, spend_limit=10)
+
+    def provider_failure(self, receipt, outcome="timeout", provider="codex", model="gpt-5.1", **changes):
+        return self.store.record_attempt(receipt, outcome, provider, model, **changes)
+
+    def test_success_and_spend_survive_restart(self):
+        receipt = self.store.claim(self.job, "worker-a", 60)
+        answer = self.store.record_attempt(receipt, "succeeded", "codex", "gpt-5.1", spend=1.5)
+        self.assertEqual((answer["attempt"], answer["state"], answer["failures"], answer["spend"]), (1, "running", 0, 1.5))
+        self.reopen()
+        row = self.store.get(self.job)
+        self.assertEqual((row["attempts"], row["spent"], row["provider"], row["model"], row["failures"]), (1, 1.5, "codex", "gpt-5.1", 0))
+        self.assertEqual(self.store.attempts(self.job), [{"at": 1000, "attempt": 1, "provider": "codex", "model": "gpt-5.1", "outcome": "succeeded", "spend": 1.5, "reason": ""}])
+        self.assertEqual(self.store.get(self.job)["state"], "running")
+
+    def test_timeout_requeues_with_backoff_and_never_completes(self):
+        receipt = self.store.claim(self.job, "worker-a", 60)
+        answer = self.provider_failure(receipt, reason="provider timed out")
+        row = self.store.get(self.job)
+        self.assertEqual((answer["state"], answer["failures"], answer["next_eligible"]), ("ready", 1, 1030))
+        self.assertEqual((row["state"], row["owner"], row["expires"], row["epoch"]), ("ready", None, None, 2))
+        self.assertFalse(row["publication"])
+        self.assertIn("retryable provider timeout", row["reason"])
+        with self.assertRaisesRegex(ContractError, "retry backoff until 1030"):
+            self.store.claim(self.job, "worker-b", 60)
+        self.now = 1031
+        self.assertEqual(self.store.claim(self.job, "worker-b", 60)["attempts"], 1)
+        self.assertEqual([e["event"] for e in self.store.db.execute("SELECT event FROM events WHERE job=? ORDER BY sequence", (self.job,))],
+                         ["enqueued", "claimed", "attempt_failed", "claimed"])
+
+    def test_quota_uses_bounded_provider_supplied_delay(self):
+        receipt = self.store.claim(self.job, "worker-a", 60)
+        answer = self.provider_failure(receipt, "quota", reason="429 quota", retry_after=5)
+        self.assertEqual((answer["state"], answer["next_eligible"]), ("ready", 1005))
+        self.assertIn("retryable provider quota: 429 quota", self.store.get(self.job)["reason"])
+        self.now = 1006
+        self.assertEqual(self.store.claim(self.job, "worker-b", 60)["failures"], 1)
+
+    def test_circuit_breaker_blocks_after_attempt_budget(self):
+        receipt = self.store.claim(self.job, "worker-a", 60)
+        self.provider_failure(receipt, reason="first timeout")
+        self.now = 1031
+        receipt = self.store.claim(self.job, "worker-b", 60)
+        answer = self.provider_failure(receipt, reason="second timeout")
+        row = self.store.get(self.job)
+        self.assertEqual((answer["state"], answer["next_eligible"]), ("blocked", None))
+        self.assertEqual((row["state"], row["failures"], row["attempts"], row["next_eligible"]), ("blocked", 2, 2, None))
+        self.assertIn("attempt budget exhausted: second timeout", row["reason"])
+        with self.assertRaisesRegex(ContractError, "job is not ready"):
+            self.store.claim(self.job, "worker-c", 60)
+
+    def test_spend_limit_stops_new_paid_work_but_preserves_evidence(self):
+        receipt = self.store.claim(self.job, "worker-a", 60)
+        self.store.record_attempt(receipt, "succeeded", "codex", "gpt-5.1", spend=10)
+        self.store.release(receipt, "ready", "attempt recorded")
+        with self.assertRaisesRegex(ContractError, "spend limit reached: 10"):
+            self.store.claim(self.job, "worker-b", 60)
+        status = self.store.status()
+        self.assertEqual(status["limits"], {"spend_limit": 10, "max_attempts": 2, "backoff": 30, "max_backoff": 100})
+        self.assertTrue(any(reason.startswith("spend limit reached") for reason in status["jobs"][0]["admission"]))
+        self.assertEqual(self.store.get(self.job)["spent"], 10)
+
+    def test_failure_cannot_complete_or_publish(self):
+        receipt = self.store.claim(self.job, "worker-a", 60)
+        self.provider_failure(receipt, "failed", reason="provider crashed")
+        self.assertNotIn(self.store.get(self.job)["state"], {"submitted", "accepted", "merged"})
+        self.assertFalse(self.store.get(self.job)["publication"])
+        with self.assertRaisesRegex(ContractError, "lease inactive"):
+            self.store.begin_publication(receipt, {"head_sha": "b" * 40, "base_sha": "a" * 40, "branch": "worker/change"})
+
+    def test_reconcile_clear_resets_circuit_but_retains_history(self):
+        receipt = self.store.claim(self.job, "worker-a", 60)
+        self.provider_failure(receipt, reason="first")
+        self.now = 1031
+        self.provider_failure(self.store.claim(self.job, "worker-b", 60), reason="second")
+        blocked = self.store.get(self.job)
+        self.store.reconcile(self.job, blocked["epoch"], "clear", "private:operator/retry")
+        row = self.store.get(self.job)
+        self.assertEqual((row["state"], row["failures"], row["next_eligible"], row["attempts"], row["spent"]), ("ready", 0, None, 2, 0))
+        self.assertEqual(self.store.claim(self.job, "worker-c", 60)["failures"], 0)
+
+    def test_version_one_database_migrates_in_place(self):
+        self.store.close()
+        legacy = Path(self.temp.name) / "legacy.sqlite"
+        db = sqlite3.connect(legacy)
+        db.executescript("""
+          CREATE TABLE meta (key TEXT PRIMARY KEY, value REAL NOT NULL);
+          INSERT INTO meta VALUES ('version', 1);
+          INSERT INTO meta VALUES ('last_time', 0);
+          CREATE TABLE jobs (
+            id TEXT PRIMARY KEY, repository TEXT NOT NULL, issue INTEGER NOT NULL,
+            feature TEXT NOT NULL, task_digest TEXT NOT NULL, snapshot TEXT NOT NULL,
+            state TEXT NOT NULL, owner TEXT, token TEXT, epoch INTEGER NOT NULL DEFAULT 0,
+            expires REAL, checkpoint TEXT, publication TEXT, reason TEXT,
+            UNIQUE(repository, issue), UNIQUE(repository, feature));
+          CREATE TABLE events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL,
+            at REAL NOT NULL, event TEXT NOT NULL, epoch INTEGER NOT NULL, detail TEXT NOT NULL);
+          CREATE TABLE requests (
+            id TEXT PRIMARY KEY, dependent TEXT NOT NULL, producer TEXT NOT NULL,
+            spec TEXT NOT NULL, state TEXT NOT NULL, result TEXT);
+        """)
+        db.execute("INSERT INTO jobs(id,repository,issue,feature,task_digest,snapshot,state) VALUES (?,?,?,?,?,?,'ready')",
+                   ("example/game:FACTORY-001", "example/game", 71, "FACTORY-001", "d" * 64, json.dumps(snapshot())))
+        db.commit()
+        db.close()
+        self.store = JobStore(legacy, lambda: self.now)
+        row = self.store.get("example/game:FACTORY-001")
+        self.assertEqual((row["attempts"], row["failures"], row["spent"], row["next_eligible"]), (0, 0, 0, None))
+        self.assertEqual(self.store.db.execute("SELECT value FROM meta WHERE key='version'").fetchone()[0], 2)
+        self.assertEqual(self.store.attempts("example/game:FACTORY-001"), [])
+
+    def test_invalid_attempt_records_fail_closed(self):
+        receipt = self.store.claim(self.job, "worker-a", 60)
+        for changes in ({"reason": ""}, {"spend": -1}, {"retry_after": 0},
+                        {"provider": ""}, {"model": ""}):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ContractError):
+                    self.provider_failure(receipt, **changes)
+        with self.assertRaisesRegex(ContractError, "unknown provider outcome"):
+            self.provider_failure(receipt, "magic", reason="x")
+        self.assertEqual(self.store.get(self.job)["state"], "running")
+        self.assertEqual(self.store.attempts(self.job), [])
+
+    def test_cli_records_attempt_and_reports_limits(self):
+        cli = Path(__file__).resolve().parents[1] / "cli.py"
+        self.store.close()
+        data = snapshot()
+        data["captured_at"] = __import__("time").time()
+        self.store = JobStore(self.path)
+        self.store.enqueue(data)
+        self.store.close()
+        receipt = Path(self.temp.name) / "lease.json"
+        payload = Path(self.temp.name) / "attempt.json"
+        database = str(self.path)
+        claim = subprocess.run([sys.executable, str(cli), "claim", "--database", database, "--owner", "codex",
+                                "--receipt", str(receipt), self.job], capture_output=True, text=True)
+        self.assertEqual(claim.returncode, 0, claim.stderr)
+        payload.write_text(json.dumps({"outcome": "timeout", "provider": "codex", "model": "gpt-5.1", "reason": "timed out"}))
+        attempt = subprocess.run([sys.executable, str(cli), "attempt", "--database", database, "--receipt", str(receipt), str(payload)],
+                                 capture_output=True, text=True)
+        self.assertEqual(attempt.returncode, 0, attempt.stderr)
+        self.assertEqual(json.loads(attempt.stdout)["state"], "ready")
+        self.assertFalse(receipt.exists())
+        history = subprocess.run([sys.executable, str(cli), "history", "--database", database, self.job], capture_output=True, text=True)
+        self.assertEqual(history.returncode, 0, history.stderr)
+        self.assertEqual([a["outcome"] for a in json.loads(history.stdout)["attempts"]], ["timeout"])
 
 
 if __name__ == "__main__":

@@ -35,23 +35,37 @@ def verified(value, label):
     return sorted(value)
 
 
+def _amount(value, label):
+    require(type(value) in (int, float) and value == value and value not in (float("inf"), float("-inf")), label + " must be a finite number")
+    require(value >= 0, label + " must not be negative")
+    return float(value)
+
+
 class JobStore:
-    def __init__(self, path, clock=time.time, max_running=None):
+    def __init__(self, path, clock=time.time, max_running=None, spend_limit=None, max_attempts=3, backoff=30, max_backoff=3600):
         require(max_running is None or (type(max_running) is int and max_running >= 1), "running cap must be a positive integer")
+        require(spend_limit is None or (type(spend_limit) in (int, float) and spend_limit == spend_limit and 0 < spend_limit < float("inf")), "spend limit must be a positive finite number")
+        require(type(max_attempts) is int and max_attempts >= 1, "retry attempt budget must be a positive integer")
+        require(type(backoff) in (int, float) and 0 < backoff < float("inf"), "backoff must be a positive finite number")
+        require(type(max_backoff) in (int, float) and backoff <= max_backoff < float("inf"), "max backoff must be finite and at least the base backoff")
         self.clock, self.max_running = clock, max_running
+        self.spend_limit, self.max_attempts = spend_limit, max_attempts
+        self.backoff, self.max_backoff = backoff, max_backoff
         self.db = sqlite3.connect(Path(path), timeout=10, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript("""
           CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value REAL NOT NULL);
-          INSERT OR IGNORE INTO meta VALUES ('version', 1);
+          INSERT OR IGNORE INTO meta VALUES ('version', 2);
           INSERT OR IGNORE INTO meta VALUES ('last_time', 0);
           CREATE TABLE IF NOT EXISTS jobs (
             id TEXT PRIMARY KEY, repository TEXT NOT NULL, issue INTEGER NOT NULL,
             feature TEXT NOT NULL, task_digest TEXT NOT NULL, snapshot TEXT NOT NULL,
             state TEXT NOT NULL, owner TEXT, token TEXT, epoch INTEGER NOT NULL DEFAULT 0,
             expires REAL, checkpoint TEXT, publication TEXT, reason TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
+            provider TEXT, model TEXT, spent REAL NOT NULL DEFAULT 0, next_eligible REAL,
             UNIQUE(repository, issue), UNIQUE(repository, feature));
           CREATE TABLE IF NOT EXISTS events (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL,
@@ -59,8 +73,28 @@ class JobStore:
           CREATE TABLE IF NOT EXISTS requests (
             id TEXT PRIMARY KEY, dependent TEXT NOT NULL, producer TEXT NOT NULL,
             spec TEXT NOT NULL, state TEXT NOT NULL, result TEXT);
+          CREATE TABLE IF NOT EXISTS attempts (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL,
+            at REAL NOT NULL, attempt INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+            outcome TEXT NOT NULL, spend REAL NOT NULL, reason TEXT NOT NULL);
         """)
-        require(self.db.execute("SELECT value FROM meta WHERE key='version'").fetchone()[0] == 1, "unsupported store version")
+        self._migrate()
+        require(self.db.execute("SELECT value FROM meta WHERE key='version'").fetchone()[0] == 2, "unsupported store version")
+
+    def _migrate(self):
+        version = self.db.execute("SELECT value FROM meta WHERE key='version'").fetchone()[0]
+        if version == 2:
+            return
+        require(version == 1, "unsupported store version")
+        # Version 1 stores predate durable attempt/spend records. Add columns in
+        # place so an existing coordinator database survives this upgrade.
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}
+        for name, declaration in (("attempts", "INTEGER NOT NULL DEFAULT 0"), ("failures", "INTEGER NOT NULL DEFAULT 0"),
+                                  ("provider", "TEXT"), ("model", "TEXT"), ("spent", "REAL NOT NULL DEFAULT 0"),
+                                  ("next_eligible", "REAL")):
+            if name not in columns:
+                self.db.execute("ALTER TABLE jobs ADD COLUMN " + name + " " + declaration)
+        self.db.execute("UPDATE meta SET value=2 WHERE key='version'")
 
     def close(self):
         self.db.close()
@@ -131,11 +165,16 @@ class JobStore:
             self.db.execute("UPDATE jobs SET state='running',owner=?,token=?,epoch=?,expires=?,reason=NULL WHERE id=?", (owner, token, epoch, now + ttl, job))
             self.record(job, now, "claimed", epoch, {"owner": owner})
             return {"job": job, "owner": owner, "token": token, "epoch": epoch, "expires": now + ttl, "task_digest": row["task_digest"], "base_sha": snapshot["base_sha"], "checkpoint": json.loads(row["checkpoint"]) if row["checkpoint"] else None,
+                    "attempts": row["attempts"], "failures": row["failures"], "provider": row["provider"], "model": row["model"], "spent": row["spent"],
                     "results": self._results(job), "requests": self._open_requests(job)}
 
     def _admission(self, row, snapshot, now):
         """Reasons a ready job cannot be claimed now."""
         reasons = list(evaluate(snapshot, now)["reasons"])
+        if row["next_eligible"] is not None and row["next_eligible"] > now:
+            reasons.append("retry backoff until %s" % row["next_eligible"])
+        if self.spend_limit is not None and row["spent"] >= self.spend_limit:
+            reasons.append("spend limit reached: %s of %s" % (row["spent"], self.spend_limit))
         for other in self.db.execute("SELECT * FROM jobs WHERE repository=? AND id!=?", (row["repository"], row["id"])):
             # Unknown publication outcomes remain reserved even after expiry/cancellation.
             if other["state"] in {"running", "publishing", "submitted"} or other["publication"]:
@@ -173,6 +212,51 @@ class JobStore:
             self.db.execute("UPDATE jobs SET expires=? WHERE id=?", (now + ttl, receipt["job"]))
             self.record(receipt["job"], now, "heartbeat", receipt["epoch"])
 
+    def record_attempt(self, receipt, outcome, provider, model, spend=0, reason="", retry_after=None):
+        """Persist one bounded provider attempt and its consumed budget.
+
+        A timeout/quota/failure never completes the job: it releases the lease,
+        enters a bounded backoff and, after the configured attempt budget, opens
+        the circuit as blocked instead of retrying forever. A success resets the
+        consecutive-failure count but leaves attempt/spend history intact.
+        """
+        require(outcome in {"succeeded", "timeout", "quota", "failed"}, "unknown provider outcome")
+        require(nonempty(provider) and nonempty(model), "provider and model version required")
+        spend = _amount(spend, "spend")
+        require(outcome == "succeeded" or nonempty(reason), "provider failure needs a reason")
+        require(retry_after is None or (type(retry_after) in (int, float) and 0 < retry_after < float("inf")), "retry delay must be a positive finite number")
+        with self.transaction() as now:
+            row = self._owned(receipt, now)
+            require(row["state"] == "running", "cannot record a provider attempt during publication")
+            attempt, total = row["attempts"] + 1, row["spent"] + spend
+            self.db.execute("INSERT INTO attempts(job,at,attempt,provider,model,outcome,spend,reason) VALUES (?,?,?,?,?,?,?,?)",
+                            (receipt["job"], now, attempt, provider, model, outcome, spend, reason))
+            if outcome == "succeeded":
+                self.db.execute("UPDATE jobs SET attempts=?,provider=?,model=?,spent=?,failures=0,next_eligible=NULL WHERE id=?",
+                                (attempt, provider, model, total, receipt["job"]))
+                self.record(receipt["job"], now, "attempt", receipt["epoch"], {"attempt": attempt, "outcome": outcome, "spend": spend})
+                return {"attempt": attempt, "outcome": outcome, "state": row["state"], "failures": 0, "spend": total, "next_eligible": None}
+            failures, epoch = row["failures"] + 1, row["epoch"] + 1
+            if failures >= self.max_attempts:
+                state, next_eligible = "blocked", None
+                stop = "attempt budget exhausted: " + reason
+                self.db.execute("UPDATE jobs SET state='blocked',owner=NULL,token=NULL,expires=NULL,epoch=?,attempts=?,failures=?,provider=?,model=?,spent=?,next_eligible=NULL,reason=? WHERE id=?",
+                                (epoch, attempt, failures, provider, model, total, stop, receipt["job"]))
+                self.record(receipt["job"], now, "circuit_opened", epoch, {"attempt": attempt, "outcome": outcome, "failures": failures, "reason": stop})
+            else:
+                delay = min(self.max_backoff, retry_after if retry_after is not None else self.backoff * 2 ** min(failures - 1, 30))
+                state, next_eligible = "ready", now + delay
+                stop = "retryable provider " + outcome + ": " + reason
+                self.db.execute("UPDATE jobs SET state='ready',owner=NULL,token=NULL,expires=NULL,epoch=?,attempts=?,failures=?,provider=?,model=?,spent=?,next_eligible=?,reason=? WHERE id=?",
+                                (epoch, attempt, failures, provider, model, total, next_eligible, stop, receipt["job"]))
+                self.record(receipt["job"], now, "attempt_failed", epoch, {"attempt": attempt, "outcome": outcome, "failures": failures, "spend": spend, "next_eligible": next_eligible})
+            return {"attempt": attempt, "outcome": outcome, "state": state, "failures": failures, "spend": total, "next_eligible": next_eligible}
+
+    def attempts(self, job):
+        """Attempt/spend history; retained across restarts and never tokens."""
+        self.get(job)
+        return [dict(row) for row in self.db.execute("SELECT at,attempt,provider,model,outcome,spend,reason FROM attempts WHERE job=? ORDER BY sequence", (job,))]
+
     def checkpoint(self, receipt, checkpoint):
         require(isinstance(checkpoint, dict) and sha(checkpoint.get("base_sha")) and sha(checkpoint.get("head_sha")) and nonempty(checkpoint.get("next_step")), "checkpoint requires exact base/head and next step")
         require(len(canonical(checkpoint).encode()) <= 65536, "checkpoint exceeds 64KiB; store logs separately")
@@ -197,7 +281,7 @@ class JobStore:
             row = self._owned(receipt, now)
             require(not row["publication"] or state in {"blocked", "submitted"}, "publication must be reconciled before requeue")
             require(state != "submitted" or row["publication"], "submission requires publication intent")
-            self.db.execute("UPDATE jobs SET state=?,owner=NULL,token=NULL,expires=NULL,epoch=epoch+1,reason=? WHERE id=?", (state, reason, receipt["job"]))
+            self.db.execute("UPDATE jobs SET state=?,owner=NULL,token=NULL,expires=NULL,epoch=epoch+1,next_eligible=NULL,reason=? WHERE id=?", (state, reason, receipt["job"]))
             self.record(receipt["job"], now, "released", receipt["epoch"] + 1, {"state": state, "reason": reason})
 
     def cancel(self, job, reason):
@@ -219,8 +303,10 @@ class JobStore:
             row = self.get(job)
             require(row["epoch"] == expected_epoch and row["state"] in {"blocked", "submitted", "cancelled"}, "reconciliation state changed")
             require(outcome != "accepted" or row["publication"], "cannot accept without a publication")
-            state = "ready" if outcome == "clear" else "accepted"
-            self.db.execute("UPDATE jobs SET state=?,publication=NULL,epoch=epoch+1,reason=? WHERE id=?", (state, evidence_ref, job))
+            if outcome == "clear":
+                self.db.execute("UPDATE jobs SET state='ready',publication=NULL,epoch=epoch+1,failures=0,next_eligible=NULL,reason=? WHERE id=?", (evidence_ref, job))
+            else:
+                self.db.execute("UPDATE jobs SET state='accepted',publication=NULL,epoch=epoch+1,reason=? WHERE id=?", (evidence_ref, job))
             self.record(job, now, "reconciled", row["epoch"] + 1, {"outcome": outcome, "evidence_ref": evidence_ref})
 
     def request(self, receipt, specs):
@@ -301,10 +387,15 @@ class JobStore:
                     "process_liveness": "unknown: the store records leases, not processes",
                     "scope": snapshot["task"]["scope"],
                     "checkpoint": {"present": checkpoint is not None, "head_sha": checkpoint and checkpoint["head_sha"], "next_step": checkpoint and checkpoint["next_step"]},
+                    "attempts": row["attempts"], "failures": row["failures"], "provider": row["provider"], "model": row["model"],
+                    "spent": row["spent"], "next_eligible": row["next_eligible"],
                     "admission": self._admission(row, snapshot, now) if row["state"] == "ready" else [],
                     "waiting_on": [r["id"] for r in self._requests("dependent", row["id"], "open")],
                     "requested_of": [r["id"] for r in self._requests("producer", row["id"], "open")],
                 })
-            return {"schema": "neptune.factory-status.v1", "at": now, "jobs": jobs}
+            return {"schema": "neptune.factory-status.v1", "at": now,
+                    "limits": {"spend_limit": self.spend_limit, "max_attempts": self.max_attempts,
+                               "backoff": self.backoff, "max_backoff": self.max_backoff},
+                    "jobs": jobs}
         finally:
             self.db.execute("COMMIT")
