@@ -69,10 +69,10 @@ order and stub calls on every vector, and at least one detected source mutant
 
 | Module | Static entries | MATCHING | NONMATCHING-verified | Asm-only |
 | --- | ---: | ---: | ---: | ---: |
-| USA KRNL | 4,879 | 0 | 1,638 | 3,241 |
+| USA KRNL | 4,879 | 0 | 1,754 | 3,125 |
 | USA BOOT | 1,760 | 760 (code-map lane) | 0 | 1,000 |
 
-Counts at run 20261107T1350Z, private head `90cb5f02`. KRNL still rebuilds
+Counts at run 20261107T1350Z, private head `6e37bd54`. KRNL still rebuilds
 byte-identically after every rename (`split.py --only krnl` + `make` +
 `check.py`: `usa/krnl` SHA-256 `20109f50…c798a7`, 14/14 USA modules).
 BOOT's MATCHING count is the code-map lane's (`config/usa/boot.status.txt`).
@@ -345,9 +345,12 @@ startup re-registers `0x41` → `06006368`. The inventory note is corrected.
   `0606AA06` after another function's `rts`); KRNL static entries are 4,879.
 - Generator directives `@memstub` and `@range` (fuzzed callee results and
   bounded global values), and argument kinds for self-pointing records.
-- KRNL: 4,879 entries, 1,638 NONMATCHING-verified (561 this run), 0 MATCHING
-  (SHC blocker); krnl split + `check.py` byte-identical (14/14 USA modules),
-  `make audit` clean.
+- End of run (private `6e37bd54`, `small33.c`..`small40.c` added after
+  `90cb5f02`, `small38.c`/`small39.c` are bomber helpers): KRNL 4,879 entries, 1,754
+  NONMATCHING-verified (677 this run),
+  0 MATCHING (SHC blocker); krnl split + `check.py` byte-identical (14/14 USA
+  modules), `make audit` clean. About 320 of the run's functions are object
+  (enemy/boss) state handlers.
 
 ## Frontier (ranked)
 
@@ -360,17 +363,20 @@ startup re-registers `0x41` → `06006368`. The inventory note is corrected.
    allocator (`0601E13C`) are now in C. Next: the throw/carry state machines
    `0601F830` and `06020560`, and the item special actor `0602277C` (uses SHC
    runtime helpers).
-2. Stage system leftovers: the per-stage hooks (`0x060B30C4`), the view task
+2. **Object (enemy/boss) state machines** (`0x0606C000`-`0x06094000`): the
+   small handlers are mostly in C now; next are the larger per-object
+   handlers and the shared state test `0606CF3E`.
+3. Stage system leftovers: the per-stage hooks (`0x060B30C4`), the view task
    `0600D6B2`, the timer `0602ED18`/`0602ED56`.
-3. **Scheduler and per-frame order (#492).** `060061C4`/`060061E6`/`06006D36`
+4. **Scheduler and per-frame order (#492).** `060061C4`/`060061E6`/`06006D36`
    and the VBlank handler `06006368`. Ordering still open: pad read, game task
    and presentation within a frame.
-4. Ghidra drafts of all 4,869 inventory functions exist in lane evidence
+5. Ghidra drafts of all 4,869 inventory functions exist in lane evidence
    (`tools/ghidra/drafts.sh`). They are a starting point for the C, not
    evidence.
-5. **BOOT game-side functions.** BOOT is GCC output, so they can be MATCHING.
+6. **BOOT game-side functions.** BOOT is GCC output, so they can be MATCHING.
    Coordinate with code-map, which owns BOOT's library units.
-6. **Blocker for KRNL MATCHING:** the owner must supply Hitachi SHC (the
+7. **Blocker for KRNL MATCHING:** the owner must supply Hitachi SHC (the
    1995-96 SH C compiler).
-7. Earlier measurement items stay open: dynamic interrupt handlers, overlay
+8. Earlier measurement items stay open: dynamic interrupt handlers, overlay
    loader, unclassified KRNL halfwords and BOOT's `0x0604B4B0` lifetime.
