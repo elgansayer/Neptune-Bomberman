@@ -297,6 +297,7 @@ verified dispatch but open bodies. See
 | 20261107T1351Z (cont. 5) | PR #940 | The game DSP program was matched to the reference core state already recorded in the 2026-11-05 evidence (pinned private test). The XBAND driver item was found in the client database: its list starts one entry before the recorded offset, a note for the assets lane. Residency check: extracted banks are byte-exact in reference-core sound RAM (sweep of 1,175 states: 51 of 101 unique payloads). Private head `d4ced488`. |
 | 20261107T1351Z (cont. 6) | PR #942 | Debug sound-effect test and host library versions found in the kernel. A further 384 battle/item states added no resident payloads (51 of 101 stays). Private head `1fbdfdb1`. |
 | 20261107T1611Z | this PR | Shared build: `tools/split/split.py` takes a module-level `source =` and emits a segment that includes the hand-written annotated driver source; `config/usa.toml` uses it for snd/xbsnd/nlsnd and `config/japan.toml` for snd. `make check` is 19/19 byte-identical (snd/xbsnd/nlsnd/japan snd included, and BOOT's embedded NLSND copy follows). Negative control: a one-byte source mutation fails `tools/check.py` at offset 0x1; restoring gives the original hash. Private `9d99455c`. |
+| 20261107T1611Z (cont. 2) | this PR | Driver-render attempt in the isolated probe. Booting Reset needs the SCSP window relocated below 0x80000 and, because data regions may not overlap executable ranges and only 4 ranges are allowed, more disjoint ranges than Reset/MainLoop + BootPatch/BootCheck + ScspInit + VoiceInit need with their literal pools and the `ScspInitRegs` table at 0x3C42. Reset does reach ScspInit with `0x4E1 = 0x7F`; the 0x3C42 table read is the first fault. Recorded as the blocker for frontier item 4; a render should use the full coverage core. Private `97a3cee6`. |
 | 20261107T1611Z (cont.) | this PR | PlaySound scan: a forward dataflow pass re-checks every dynamic call site over its function (constants merged on joins, caller-saved registers undefined after a call). Four sites move to the constant 4 (USA `func_060482FC`/`func_06058492`, Japan `func_0603DD82`/`func_0605DC80`); their r5/r6 arguments are pointers for another routine, so the earlier argument-wrapper reading was wrong. Counts: USA 377/384 constant, Japan 368/375; 7 dynamic per release (six computed lookups + debug SE test). Three synthetic tests. Private `8c0baab9`. |
 
 ## Frontier (ranked)
@@ -311,7 +312,15 @@ verified dispatch but open bodies. See
 2. **DSP behaviour.** The one EXB program is decoded (84/128 steps); next is a
    behavioural test against the original core, then the sound-ID producer map (#707).
 4. **Render through the original driver** (88-sample ticks) and compare with
-   the decoded sequences and tone banks.
+   the decoded sequences and tone banks. Blocker found in run 20261107T1611Z:
+   the isolated m68k probe cannot boot the driver. Data regions may not
+   overlap executable ranges and only 4 ranges are allowed; Reset/MainLoop,
+   BootPatch/BootCheck, ScspInit and VoiceInit plus their PC-relative literal
+   pools and the `ScspInitRegs` table at 0x3C42 need more disjoint ranges. The
+   SCSP window must also move below 0x80000 (0x100000 -> 0x40000). Reset runs
+   to ScspInit under that relocation with `0x4E1 = 0x7F` (no self-patches),
+   then faults at the 0x3C42 table read. A render needs the full coverage
+   core/emulator, not more isolated-probe ranges.
 5. **Sound IDs.** USA producer map done (run 20261107T1351Z, above); the
    remaining items are in 0.
 
