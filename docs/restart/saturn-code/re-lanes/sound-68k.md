@@ -59,9 +59,11 @@ counts below are unchanged.
   in the same sound-task pass. The table has 322 records (identical in both
   banks); a second table lists 20 streamed voice-clip AIFF names, one of which
   (`M_087.AIF`) is not on the USA disc but is on the Japan disc. A static scan
-  finds 384 call sites (57 of them tail calls): 361 pass a constant ID (244
-  distinct, with the item-pickup table), 23 compute it. The scan agrees with
-  every play-sound call in usa-code's verified C (8 sites). Each record is
+  finds 384 call sites (57 of them tail calls): 377 pass a constant ID (247
+  distinct, with the item-pickup table), 7 are computed or user-selected. A
+  forward dataflow re-check resolves every site the backward scan called
+  dynamic. The scan agrees with every play-sound call in usa-code's verified
+  C (8 sites). Each record is
   resolved to a song file in every sound context where it exists (all 322
   resolve somewhere).
 - **Tone banks verified against the driver.** SND's voice start routine
@@ -102,10 +104,11 @@ counts below are unchanged.
   `0x0600A000`). Japan has the same 322 records and clip names. One
   item-pickup entry differs between the releases. After the scan learned to
   follow callee-saved register copies and constants spilled to the stack:
-  USA has 384 sites (375 constant, 9 computed) and Japan 375 (366, 9). No
-  ID is used by only one release. The computed sites read from the code are
-  per-player offsets (a base plus the actor's player field), a 4-entry
-  table, the item table, two argument wrappers and one return value.
+  USA has 384 sites (377 constant) and Japan 375 (368). No ID is used by
+  only one release. The 7 sites left per release are six computed lookups
+  (per-player offsets, a 4-entry table, the item table) and the debug SE
+  test, whose ID is user input. The two former "argument wrappers" pass the
+  constant 4; their r5/r6 arguments go to another routine.
 - **Which banks load when.** The scene loader picks the sound bank by game
   mode and world: normal worlds 1-5 each have their own bank, and battle and
   Master one each. Voice banks come from constants or from two per-player
@@ -224,7 +227,7 @@ manifest; offline check: 1,649 outputs, 0 problems):
 | ISO audio files | 131 | 20 |
 | CD-DA tracks | 29/29 FLAC, decode-verified to the source PCM | 29/29 |
 | XBAND sound banks (run 1351Z) | 2 tone banks (28 samples), 2 sequence banks (19 songs, MIDI), 1 DSP program, 1 area map | none on the disc |
-| Sound-ID table (run 1351Z) | 322 records, 20 clip names, 28-entry item table, 384 call sites, 17 clip-stream sites | same 322 records; 375 call sites, 16 clip-stream sites |
+| Sound-ID table (run 1611Z) | 322 records, 20 clip names, 28-entry item table, 384 call sites (377 constant), 17 clip-stream sites | same 322 records; 375 call sites (368 constant), 16 clip-stream sites |
 
 FLAC files (247 MB per release) stay in `$RE_ASSETS_OUT` with committed
 manifests (FLAC and PCM hashes).
@@ -292,17 +295,19 @@ verified dispatch but open bodies. See
 | 20261107T1351Z (cont. 3) | PR #938 | Generic public tool `tools/saturn_lab/sh2_call_args.py` (call sites of an address and constant argument registers, by the same rules as the private sound-ID scan), with 11 owned synthetic tests; run locally on the USA kernel it reproduces the private counts (384 sites, 375 constant). Private follow-ups: NetLink WAV names are built in the boot program from 14 event names and a numbered `%d.WAV` variant (all 112 reachable); resource kind 10 entry 3 is a 1-bit glyph font, not sound. |
 | 20261107T1351Z (cont. 4) | PR #939 | Scene → sound-bank and voice-bank selection read from the kernel with the new scanner (private `docs/sound/SOUND_IDS.md`); the headerless voice-bank slots are unreachable. Context rule added to issue #935. Private head `8fdd3131`. |
 | 20261107T1351Z (cont. 5) | PR #940 | The game DSP program was matched to the reference core state already recorded in the 2026-11-05 evidence (pinned private test). The XBAND driver item was found in the client database: its list starts one entry before the recorded offset, a note for the assets lane. Residency check: extracted banks are byte-exact in reference-core sound RAM (sweep of 1,175 states: 51 of 101 unique payloads). Private head `d4ced488`. |
-| 20261107T1351Z (cont. 6) | this PR | Debug sound-effect test and host library versions found in the kernel. A further 384 battle/item states added no resident payloads (51 of 101 stays). Private head `1fbdfdb1`. |
+| 20261107T1351Z (cont. 6) | PR #942 | Debug sound-effect test and host library versions found in the kernel. A further 384 battle/item states added no resident payloads (51 of 101 stays). Private head `1fbdfdb1`. |
+| 20261107T1611Z | this PR | Shared build: `tools/split/split.py` takes a module-level `source =` and emits a segment that includes the hand-written annotated driver source; `config/usa.toml` uses it for snd/xbsnd/nlsnd and `config/japan.toml` for snd. `make check` is 19/19 byte-identical (snd/xbsnd/nlsnd/japan snd included, and BOOT's embedded NLSND copy follows). Negative control: a one-byte source mutation fails `tools/check.py` at offset 0x1; restoring gives the original hash. Private `9d99455c`. |
+| 20261107T1611Z (cont.) | this PR | PlaySound scan: a forward dataflow pass re-checks every dynamic call site over its function (constants merged on joins, caller-saved registers undefined after a call). Four sites move to the constant 4 (USA `func_060482FC`/`func_06058492`, Japan `func_0603DD82`/`func_0605DC80`); their r5/r6 arguments are pointers for another routine, so the earlier argument-wrapper reading was wrong. Counts: USA 377/384 constant, Japan 368/375; 7 dynamic per release (six computed lookups + debug SE test). Three synthetic tests. Private `8c0baab9`. |
 
 ## Frontier (ranked)
 
 0. **SH-2 library source and open IDs.** Verify the kernel's SND/PCM library
    with usa-code, after adding a flat sound-RAM region to their differential
-   harness. Then decode the 11 computed IDs per release and the third kind-10
-   table. (Japan IDs and XBAND's loader were done in run 20261107T1351Z.)
-1. **Shared build.** Have code-map's `make check` assemble the hand-written
-   SND and NLSND sources instead of the generated segments (private
-   `src/usa/snd/snd.s`, `src/usa/nlsnd/nlsnd.s`).
+   harness. The remaining 7 sound-ID sites per release are the six computed
+   lookups and the debug SE test (user input); the third kind-10 table is a
+   glyph font. (Japan IDs and XBAND's loader were done in run 20261107T1351Z.)
+1. ~~**Shared build.**~~ Done in run 20261107T1611Z: `make check` assembles
+   `src/usa/snd/snd.s` and `src/usa/nlsnd/nlsnd.s` (19/19 byte-identical).
 2. **DSP behaviour.** The one EXB program is decoded (84/128 steps); next is a
    behavioural test against the original core, then the sound-ID producer map (#707).
 4. **Render through the original driver** (88-sample ticks) and compare with
