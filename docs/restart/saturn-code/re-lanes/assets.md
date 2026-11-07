@@ -253,7 +253,7 @@ differs only in bank bytes, and `normal2`–`normal4` are identical.
 
 ## Private repository state (runs 20261105T1623Z, 1833Z, 2123Z, 20261106T0223Z, 0723Z, 1223Z, 1723Z, 20261107T0823Z and 1543Z)
 
-Run 20261107T1543Z: `d0241525` run 0823Z's closing pass integrated (7,215 states).
+Run 20261107T1543Z: `7d74b4fc` USA-to-Japan kernel address map · `14842625` actor reader for the Japan kernel · `d0241525` run 0823Z's closing pass integrated (7,215 states).
 
 Run 20261107T0823Z (in progress at this PR): `6a0ff05` (head) mount growth rule, loader census, state lists · earlier state list, recipe README · `a5c0eec` frontier details · `aa21d70` cell-animation word closed · `ebdf9c3` attribute bits · `a9a6fd5` VDP2 map 9 with the code's palette rectangle, maps 47/65 · `538fb67` run 1723Z's closing pass integrated.
 
@@ -610,3 +610,17 @@ records · `69902d2` capture checks and sprite bindings over 86 states ·
     sequences (39 blocks) only from per-frame samples. The draw rule holds
     on 204,620 of 204,648 drawn actors. The egg-level, boss and game-over
     runs of that run gave the gain.
+  - Second PR: first emulator captures of the Japan release (in progress).
+    - New generic tool `tools/saturn_lab/sh2_xmap.py` (synthetic tests): it
+      matches the functions of two builds of an SH-2 program by their
+      opcode runs with the PC-relative fields masked, then pairs the
+      addresses their literal pools load. On the two kernels it matches
+      3,734 functions and maps 6,155 addresses (1 conflict); it reproduces
+      the Japan sprite-actor table found by hand. With it, every USA
+      memory-write recipe (stage select, ending, Master Game area clear)
+      has its Japan addresses.
+    - The Japan boot stops after the SEGA logo on a backup-memory choice
+      (internal or cartridge RAM) and waits there with no input; the
+      attract cycle never starts on its own. Holding Saturn A for 20 frames
+      picks internal RAM (a short press is ignored). From the title the USA
+      menu scripts run unchanged.
