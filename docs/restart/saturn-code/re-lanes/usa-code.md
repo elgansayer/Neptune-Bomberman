@@ -69,18 +69,20 @@ order and stub calls on every vector, and at least one detected source mutant
 
 | Module | Static entries | MATCHING | NONMATCHING-verified | Asm-only |
 | --- | ---: | ---: | ---: | ---: |
-| USA KRNL | 4,879 | 0 | 1,754 | 3,125 |
+| USA KRNL | 4,879 | 0 | 3,048 | 1,831 |
 | USA BOOT | 1,760 | 760 (code-map lane) | 0 | 1,000 |
 
-Counts at run 20261107T1350Z, private head `6e37bd54`. KRNL still rebuilds
-byte-identically after every rename (`split.py --only krnl` + `make` +
-`check.py`: `usa/krnl` SHA-256 `20109f50…c798a7`, 14/14 USA modules).
+Counts at run 20261107T1610Z, private head `ddf1bc34`. KRNL still rebuilds
+byte-identically (`split.py --only krnl` + `make` + `check.py`: `usa/krnl`
+SHA-256 `20109f50…c798a7`, `make check` 19/19 modules byte-identical).
 BOOT's MATCHING count is the code-map lane's (`config/usa/boot.status.txt`).
 KRNL has 11 static entries more than the inventory (4,868 + 11). They are
 functions reached only by a tail branch (`bra`/`jmp`) or only through a pointer
 literal, found while writing C.
 
-The 220 KRNL functions, by private source file (`src/usa/krnl/`):
+The 3,048 KRNL functions now in C, by private source file. The named topic
+files hold 220; the remaining 2,828 are in the `small.c`..`small116.c` batches
+(mainly object state handlers, wrappers, setters and record walkers):
 
 | File | Functions | System |
 | --- | ---: | --- |
@@ -97,6 +99,7 @@ The 220 KRNL functions, by private source file (`src/usa/krnl/`):
 | `bomb.c` | 20 | bomb records (a doubly linked list): lookups by cell and owner, setting bombs off, cell marks, animation frame |
 | `bomb_move.c` | 12 | moving bombs: stopping on a cell, probing the cell ahead, reversing, one-pixel steps, the second actor, following the owner |
 | `pdec.c` | 73 | a predictive stream decoder: byte, halfword and word streams, history-ring predictors, 1/2/3/4-bit field readers, mode tables |
+| `small*.c` (116 files) | 2,828 | batch-converted Ghidra drafts: object/enemy state handlers, record walkers, table clears, bounded counters, menu and scene start-up chains |
 
 
 ## Tools and identities
@@ -351,6 +354,37 @@ startup re-registers `0x41` → `06006368`. The inventory note is corrected.
   0 MATCHING (SHC blocker); krnl split + `check.py` byte-identical (14/14 USA
   modules), `make audit` clean. About 320 of the run's functions are object
   (enemy/boss) state handlers.
+
+### 20261107T1610Z
+
+- Finished the interrupted batch pipeline left by run 20261107T1545Z and ran
+  it through every generated batch: `small41.c`..`small116.c` (batches 41-105
+  from `funcs41.txt`..`funcs105.txt`, plus small batches 106-116 generated
+  just before the previous exit). Each batch was quick-passed, pruned to the
+  passing functions, then given full receipts (32 vectors, up to 16 source
+  mutants) in the isolated interpreter.
+- End of run (private `ddf1bc34`): KRNL 4,879 entries, **3,048
+  NONMATCHING-verified (1,294 this run)**, 0 MATCHING (SHC blocker), 1,831
+  asm-only. Each receipt records its source SHA-256; a cross-check found no
+  stale receipt and no duplicate status address. `make check`: 19/19 modules
+  byte-identical (`usa/krnl` SHA-256 unchanged at `20109f50…c798a7`); the C
+  lives outside the byte-identical asm build.
+- Difftest / generator changes (private `c1a6097b`):
+  - stack-argument values: parameters 5-8 are written to `@(offset,r15)` at
+    entry, so drafts with up to eight arguments can be tested;
+  - the batch generator places parameter 5+ in `[stack_args]` instead of the
+    register map;
+  - Ghidra drafts are rejected on incomplete decompiler output (unrecovered
+    jump tables / indirect jumps, stack arrays, dangling `LAB_` references)
+    rather than being converted into misleading C;
+  - `progress_md.py` gives the batch `small*.c` files a generic description.
+- The batch is mostly object (enemy/boss) state handlers, record list walkers,
+  table clears, bounded counters, menu/scene start-up chains and wrappers; the
+  named topic files still hold the 220 hand-analysed gameplay functions.
+- Accuracy note: the quick pass (16 vectors, one mutant) only prunes obvious
+  failures. A function counts as NONMATCHING-verified only with its full
+  receipt; functions whose full receipt failed are left out of the status file
+  (2-6 per batch), not counted.
 
 ## Frontier (ranked)
 
