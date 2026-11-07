@@ -30,6 +30,13 @@ Verify unattended access and quotas; do not assume subscription login can be
 reused as an OpenHands API credential. A single funded API provider is enough to
 prove the first live job. No specific model ID is hard-coded before a live check.
 
+The [host preparation tooling](../../tools/factory/HOST_READINESS.md) (#25) turns
+this checklist into a declared, checkable state: the operator writes a
+declaration of accounts, paths, credential files, concurrency and spend limits,
+the tool reports the host against it, and it keeps encrypted off-host backups
+with a verified restore. It purchases nothing, provisions no service and reports
+absent media and absent provider credentials apart from installed software.
+
 ## GitHub configuration for the VPS
 
 Prefer narrowly scoped GitHub App installation tokens. Start with a single-repo

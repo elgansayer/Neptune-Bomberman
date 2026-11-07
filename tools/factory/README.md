@@ -11,6 +11,26 @@ outcomes. #518 / FACTORY-017 owns integration into the existing factory lifecycl
 and extension to other required tools; the CLI alone does not enable that daemon.
 
 
+## Research host preparation
+
+[`host_readiness.py`](HOST_READINESS.md) (#25) prepares and audits the supplied
+research VPS against the layout, account and limit requirements in
+[REQUIREMENTS.md](../../docs/restart/REQUIREMENTS.md). The operator writes a
+declaration of accounts, paths, credential files, concurrency and spend limits;
+the tool then reports the host's OS, resources, running services, layout, private
+input protection and credential separation against it. It never opens a
+credential file, reads original media, calls a provider or GitHub, starts a
+service or provisions anything, so a passing report is not credential validity,
+media authenticity or factory health. Absent media and absent provider
+credentials stay apart from installed software.
+
+`host_backup.py` writes encrypted research/state archives and restores them in a
+verified drill. The key never reaches argv or the environment, the archive is
+authenticated before anything is decrypted, unsafe members are refused and every
+restored file is checked against the archive's manifest. Original media is never
+archived, and the off-host origin of a restored copy is an operator attestation
+that the report records as unverified.
+
 ## Existing Repo Factory integration
 
 `verify.py` is the local entrypoint for the existing Elgl Repo Factory's Neptune
